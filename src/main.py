@@ -37,9 +37,13 @@ from src.agents.registry import registry
 from src.channels import CLIChannel, FeishuChannel, EmailChannel
 from src.gateway import Gateway
 from src.channels.base import InboundMessage
-from src.scheduler import scheduler, setup_cron_jobs
+from src.scheduler import scheduler, setup_cron_jobs, Heartbeat
 from src.delivery import DeliveryRunner
 from src.concurrency import LaneManager
+
+# 全局 Lane 锁 (s07) - 用户输入优先
+lane_lock = threading.Lock()
+heartbeat: Heartbeat = None
 
 # 全局状态
 gateway = Gateway()
@@ -50,6 +54,7 @@ background_lane = lane_manager.get_or_create("background", max_concurrency=1)
 running = True
 email_channel = None  # 邮件通道全局实例
 feishu_channel = None  # 飞书通道全局实例
+heartbeat: Heartbeat = None  # Heartbeat 实例 (s07)
 
 def signal_handler(sig, frame):
     global running
@@ -57,6 +62,8 @@ def signal_handler(sig, frame):
     running = False
     scheduler.stop()
     delivery_runner.stop()
+    if heartbeat:
+        heartbeat.stop()
 
 def init_agents():
     """初始化 Agents"""
@@ -97,6 +104,32 @@ def init_channels():
         delivery_runner.register_sender("email", email_channel.send)
 
     return cli
+
+
+def init_heartbeat() -> Heartbeat:
+    """初始化 Heartbeat (s07)"""
+    global heartbeat
+
+    # 从配置读取心跳间隔和活跃时间
+    heartbeat_interval = config.heartbeat_interval if hasattr(config, 'heartbeat_interval') else 60
+    heartbeat_active_hours = config.heartbeat_active_hours if hasattr(config, 'heartbeat_active_hours') else (0, 24)
+
+    heartbeat = Heartbeat(
+        interval=heartbeat_interval,
+        active_hours=heartbeat_active_hours,
+        lane_lock=lane_lock  # 共享 Lane 锁
+    )
+
+    # 定义心跳执行的函数
+    def heartbeat_task() -> str:
+        """心跳任务 - 检查是否有待处理事项"""
+        # 这里可以扩展为检查各种后台任务的状态
+        # 目前作为占位符，返回 HEARTBEAT_OK
+        return Heartbeat.HEARTBEAT_OK
+
+    heartbeat.start(heartbeat_task)
+    return heartbeat
+
 
 def run_crawler():
     """运行爬虫"""
@@ -579,6 +612,10 @@ def main():
     crawler, qa, summarizer = init_agents()
     cli = init_channels()
 
+    # 启动心跳 (s07) - Lane 互斥，用户输入优先
+    init_heartbeat()
+    print("[Heartbeat] 已启动 (Lane 互斥模式)")
+
     # 启动投递
     delivery_runner.start()
 
@@ -619,12 +656,25 @@ def main():
     # 有效团队列表
     valid_teams = {team.id for team in config.teams}
 
-    # CLI 主循环
+    # CLI 主循环 (s07 Lane 互斥)
     while running:
-        message = cli.receive()
-        if message is None:
-            break
+        # 1. 先检查 Heartbeat 的待处理输出
+        if heartbeat:
+            pending = heartbeat.drain_output()
+            for output in pending:
+                print(f"\n[Heartbeat] {output}\n")
 
+        # 2. 获取用户输入 (blocking 获取 Lane)
+        # 用户输入始终优先 - 即使 Heartbeat 正在等待，也会被优先处理
+        lane_lock.acquire()
+        try:
+            message = cli.receive()
+            if message is None:
+                break
+        finally:
+            lane_lock.release()
+
+        # 3. 处理消息 (与之前相同的逻辑)
         if message.text.startswith("/"):
             parts = message.text.strip().split()
             cmd = parts[0].lower()
@@ -830,6 +880,8 @@ def main():
     # 清理
     scheduler.stop()
     delivery_runner.stop()
+    if heartbeat:
+        heartbeat.stop()
     print("Goodbye!")
 
 if __name__ == "__main__":
