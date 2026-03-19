@@ -1,5 +1,6 @@
 # Environment
 .env
+workspace/
 
 # Python
 __pycache__/
