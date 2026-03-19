@@ -29,7 +29,9 @@ class EmailChannel(Channel):
         self.imap_password = os.getenv("IMAP_PASSWORD")
 
         # 追踪已处理的邮件，避免重复处理
-        self._processed_ids: set = set()
+        # 使用有界集合避免内存泄漏，最多保留 1000 个 ID
+        from collections import deque
+        self._processed_ids: deque = deque(maxlen=1000)
 
     def receive(self) -> Optional[InboundMessage]:
         """通过 IMAP 轮询接收邮件"""
@@ -96,7 +98,7 @@ class EmailChannel(Channel):
             msg = self._fetch_mail(mail, mail_id)
             if msg:
                 messages.append(msg)
-                self._processed_ids.add(mail_id)
+                self._processed_ids.append(mail_id)
 
             # 标记为已读
             mail.store(mail_id, '+FLAGS', '\\Seen')

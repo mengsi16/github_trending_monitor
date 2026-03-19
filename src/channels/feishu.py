@@ -117,12 +117,12 @@ class FeishuChannel(Channel):
         3. Base64 编码后与请求中的 sign 对比
         """
         if not self.app_secret:
-            _logger.debug("未配置 APP_SECRET，跳过签名验证")
-            return True
+            _logger.warning("未配置 APP_SECRET，拒绝未签名请求")
+            return False
 
         if not timestamp or not sign:
-            _logger.debug("缺少签名参数，跳过验证")
-            return True
+            _logger.warning("缺少签名参数，拒绝请求")
+            return False
 
         try:
             # 拼接字符串: timestamp\napp_secret
@@ -142,7 +142,7 @@ class FeishuChannel(Channel):
                 _logger.debug("签名验证通过")
                 return True
             else:
-                _logger.warning(f"签名验证失败: 期望 {computed_sign}, 得到 {sign}")
+                _logger.warning("签名验证失败: 签名不匹配")
                 return False
 
         except Exception as e:
@@ -284,8 +284,8 @@ class FeishuChannel(Channel):
                     self.send_response(200)
                     self.end_headers()
 
-                except Exception as e:
-                    _logger.error(f"Webhook 处理错误: {e}")
+                except Exception:
+                    _logger.error("Webhook 处理错误")
                     self.send_error(400)
 
             def log_message(self, format, *args):

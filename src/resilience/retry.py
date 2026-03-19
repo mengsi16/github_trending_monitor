@@ -30,6 +30,9 @@ def classify_failure(exc: Exception) -> FailoverReason:
 
     return FailoverReason.unknown
 
+# 不应该重试的错误类型，直接抛出
+NON_RETRYABLE_REASONS = {FailoverReason.auth, FailoverReason.billing}
+
 def retry_with_backoff(
     func: Callable,
     max_retries: int = 3,
@@ -38,6 +41,11 @@ def retry_with_backoff(
 ) -> Any:
     """
     带退避的重试 (s09)
+
+    策略:
+    - auth/billing 错误: 不重试，直接抛出（需要人工介入或切换 API Key）
+    - rate_limit/timeout 错误: 使用较长延迟重试
+    - 其他错误: 使用指数退避重试
     """
     backoff_ms = backoff_ms or [5000, 25000, 120000]
     last_exc = None
@@ -48,23 +56,31 @@ def retry_with_backoff(
         except Exception as exc:
             last_exc = exc
 
+            # 检查是否在 retry_on 列表中，不在则直接抛出
             if retry_on and not isinstance(exc, tuple(retry_on)):
                 raise
 
             reason = classify_failure(exc)
 
-            if reason in (FailoverReason.auth, FailoverReason.billing):
-                time.sleep(300)
-                continue
+            # auth/billing 错误不重试，直接抛出（可能是 API Key 失效等）
+            if reason in NON_RETRYABLE_REASONS:
+                raise
 
+            # rate_limit: 较长延迟后重试
             if reason == FailoverReason.rate_limit:
-                time.sleep(120)
-                continue
+                if attempt < max_retries:
+                    time.sleep(120)
+                    continue
+                raise
 
+            # timeout: 较短延迟后重试
             if reason == FailoverReason.timeout:
-                time.sleep(60)
-                continue
+                if attempt < max_retries:
+                    time.sleep(60)
+                    continue
+                raise
 
+            # 其他错误: 指数退避
             if attempt < max_retries:
                 idx = min(attempt, len(backoff_ms) - 1)
                 delay = backoff_ms[idx]

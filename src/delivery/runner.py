@@ -35,6 +35,7 @@ class DeliveryRunner:
     def _loop(self):
         """投递循环"""
         backoff = config.retry_backoff
+        max_retries = config.max_retries
 
         while not self._stop_event.is_set():
             # 扫描待投递
@@ -43,22 +44,22 @@ class DeliveryRunner:
             for entry in pending:
                 sender = self.senders.get(entry.channel)
                 if not sender:
-                    self.queue.fail(entry.id, f"No sender for {entry.channel}", backoff)
+                    self.queue.fail(entry.id, f"No sender for {entry.channel}", backoff, max_retries)
                     continue
 
                 try:
                     # 调用发送函数
                     if entry.channel == "email":
-                        ok = sender(entry.to, entry.subject, entry.text)
+                        ok = sender(entry.to, entry.text, subject=entry.subject)
                     else:
                         ok = sender(entry.to, entry.text)
 
                     if ok:
                         self.queue.ack(entry.id)
                     else:
-                        self.queue.fail(entry.id, "Send failed", backoff)
+                        self.queue.fail(entry.id, "Send failed", backoff, max_retries)
                 except Exception as e:
-                    self.queue.fail(entry.id, str(e), backoff)
+                    self.queue.fail(entry.id, str(e), backoff, max_retries)
 
             # 每秒检查一次
             self._stop_event.wait(1.0)

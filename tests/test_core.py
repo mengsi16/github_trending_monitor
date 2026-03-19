@@ -48,6 +48,14 @@ teams:
         assert teams[0].id == "tech"
         assert teams[0].name == "Tech Team"
 
+    def test_empty_yaml_falls_back_to_defaults(self):
+        """测试空 YAML 内容不会导致崩溃"""
+        with patch("src.config.yaml.safe_load", return_value=None):
+            from src.config import load_config
+            cfg = load_config()
+            assert cfg.github_top_n == 20
+            assert isinstance(cfg.teams, list)
+
 
 class TestCircuitBreaker:
     """测试熔断器"""
@@ -250,6 +258,76 @@ class TestSQLiteSessionStore:
         sessions = store.list_sessions(limit=10)
         # Only count sessions created by this test
         assert len(sessions) >= 2
+
+
+class TestDeliveryRunner:
+    """测试投递 runner"""
+
+    def test_email_sender_called_with_kwargs_subject(self):
+        """测试邮件发送使用 subject 关键字参数而非位置参数"""
+        from src.delivery.runner import DeliveryRunner
+
+        class FakeQueue:
+            def __init__(self):
+                self.acked = []
+                self.failed = []
+
+            def load_pending(self):
+                return [
+                    type("Entry", (), {
+                        "id": "abc123",
+                        "channel": "email",
+                        "to": "u@example.com",
+                        "subject": "subj",
+                        "text": "body",
+                    })
+                ]
+
+            def ack(self, delivery_id):
+                self.acked.append(delivery_id)
+
+            def fail(self, delivery_id, error, backoff, max_retries=5):
+                self.failed.append((delivery_id, error, backoff, max_retries))
+
+        runner = DeliveryRunner()
+        fake_queue = FakeQueue()
+        runner.queue = fake_queue
+
+        called = {}
+
+        def fake_email_sender(to, text, **kwargs):
+            called["to"] = to
+            called["text"] = text
+            called["kwargs"] = kwargs
+            runner._stop_event.set()
+            return True
+
+        runner.register_sender("email", fake_email_sender)
+        runner._loop()
+
+        assert fake_queue.acked == ["abc123"]
+        assert fake_queue.failed == []
+        assert called["to"] == "u@example.com"
+        assert called["text"] == "body"
+        assert called["kwargs"].get("subject") == "subj"
+
+
+class TestQAAgent:
+    """测试 QAAgent 会话行为"""
+
+    def test_load_empty_session_returns_true(self):
+        """测试空会话也可成功加载"""
+        from src.agents.qa import QAAgent
+        from src.sessions.sqlite_store import SQLiteSessionStore
+
+        store = SQLiteSessionStore(agent_id="test_qa_empty_session")
+        session_id = store.create_session("empty")
+
+        qa = QAAgent(session_store=store)
+        ok = qa.load_session(session_id)
+
+        assert ok is True
+        assert qa.get_current_session_id() == session_id
 
 
 class TestLaneQueue:

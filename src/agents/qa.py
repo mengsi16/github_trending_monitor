@@ -43,12 +43,14 @@ class QAAgent(BaseAgent):
 
     def load_session(self, session_id: str) -> bool:
         """加载指定会话"""
+        info = self.session_store.get_session_info(session_id)
+        if info is None:
+            return False
+
         messages = self.session_store.load_session(session_id)
-        if messages:
-            self._current_session_id = session_id
-            self._session_messages = messages
-            return True
-        return False
+        self._current_session_id = session_id
+        self._session_messages = messages
+        return True
 
     def get_current_session_id(self) -> Optional[str]:
         """获取当前会话 ID"""

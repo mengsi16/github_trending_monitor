@@ -41,6 +41,7 @@ def load_config() -> Config:
 
     with open(config_path, encoding="utf-8") as f:
         data = yaml.safe_load(f)
+    data = data or {}
 
     agents = {}
     for name, cfg in data.get("agents", {}).items():

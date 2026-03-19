@@ -598,7 +598,8 @@ def main():
     print("=" * 50)
     print("GitHub Trending Monitor")
     print("Commands: /crawl, /summarize, /summarize [team], /compact [N], /quit")
-    print("Teams: tech, invest, content, product")
+    team_ids = [team.id for team in config.teams]
+    print(f"Teams: {', '.join(team_ids) if team_ids else '(none configured)'}")
     print("/compact N: 手动压缩，保留最近 N 轮对话 (默认 1)")
     print("/sessions: 列出历史会话")
     print("/session <id>: 继续历史会话")
@@ -616,7 +617,7 @@ def main():
     current_session_id = None
 
     # 有效团队列表
-    valid_teams = {"tech", "invest", "content", "product"}
+    valid_teams = {team.id for team in config.teams}
 
     # CLI 主循环
     while running:
@@ -681,7 +682,7 @@ def main():
                     print("  /send feishu summarize [team]             # 发送到配置的飞书群")
                     print("  /send feishu crawl                        # 发送爬取结果")
                     print()
-                    print("  # teams 可选: tech, invest, content, product")
+                    print(f"  # teams 可选: {', '.join(sorted(valid_teams)) if valid_teams else '(none configured)'}")
                     print("  # 不指定 teams 时，发送所有团队的总结")
                     print("  # 示例: /send mail summarize tech content")
                 else:
