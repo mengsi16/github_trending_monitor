@@ -1,0 +1,76 @@
+# GitHub Trending Monitor 配置示例
+# 复制此文件为 config.yaml 并填入真实值
+
+agents:
+  crawler:
+    model: "MiniMax-M2.5"
+    max_tokens: 8096
+  qa:
+    model: "MiniMax-M2.5"
+    max_tokens: 4096
+  summarizer:
+    model: "MiniMax-M2.5"
+    max_tokens: 8192
+
+github:
+  api_url: "https://api.github.com"
+  top_n: 20
+
+chromadb:
+  persist_directory: "./workspace/.chromadb"
+
+delivery:
+  retry_backoff: [5, 25, 120, 600]  # seconds
+  max_retries: 5
+
+teams:
+  - id: "tech"
+    name: "技术团队"
+    channels: ["email", "feishu"]
+    feishu_chat_id: "oc_your_chat_id_here"
+    email: "your_email@example.com"
+  - id: "invest"
+    name: "投资团队"
+    channels: ["email", "feishu"]
+    feishu_chat_id: "oc_your_chat_id_here"
+    email: "your_email@example.com"
+  - id: "content"
+    name: "内容团队"
+    channels: ["email", "feishu"]
+    feishu_chat_id: "oc_your_chat_id_here"
+    email: "your_email@example.com"
+  - id: "product"
+    name: "产品团队"
+    channels: ["email", "feishu"]
+    feishu_chat_id: "oc_your_chat_id_here"
+    email: "your_email@example.com"
+
+# 多 Bot 配置 (飞书)
+# 每个 Bot 有独立的 app_id/app_secret，可以有不同的 personality
+bots:
+  - id: "tech-bot"
+    name: "技术团队Bot"
+    feishu:
+      app_id: "cli_xxxxxxxxxxxxxxxx"
+      app_secret: "your_app_secret_here"
+      bot_open_id: "oc_xxxxxxxxxxxxxxxx"
+    personality: "tech"
+    agent: "qa"
+  - id: "invest-bot"
+    name: "投资团队Bot"
+    feishu:
+      app_id: "cli_xxxxxxxxxxxxxxxx"
+      app_secret: "your_app_secret_here"
+      bot_open_id: "oc_xxxxxxxxxxxxxxxx"
+    personality: "invest"
+    agent: "qa"
+
+cron:
+  crawler_time: "0 9 * * *"
+  summarizer_time: "30 9 * * *"
+
+# Webhook 配置
+webhook:
+  host: "0.0.0.0"
+  port: 8080
+  path: "/webhook/feishu"
