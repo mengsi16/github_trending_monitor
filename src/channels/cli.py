@@ -12,7 +12,13 @@ class CLIChannel(Channel):
         try:
             text = input("\nYou > ").strip()
             if not text:
-                return None
+                return InboundMessage(
+                    text="",
+                    sender_id="cli-user",
+                    channel="cli",
+                    account_id=self.account_id,
+                    peer_id="cli-user",
+                )
             return InboundMessage(
                 text=text,
                 sender_id="cli-user",

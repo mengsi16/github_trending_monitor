@@ -4,7 +4,8 @@ from .base import BaseAgent
 from ..tools import QA_TOOLS, QA_HANDLERS
 from ..sessions import SQLiteSessionStore
 
-QA_PROMPT = """你是一个 GitHub 热榜问答 Agent。
+# 基础 QA Prompt
+QA_PROMPT_BASE = """你是一个 GitHub 热榜问答 Agent。
 
 你可以使用以下工具：
 - rag_search: 搜索已爬取的项目信息
@@ -16,13 +17,78 @@ QA_PROMPT = """你是一个 GitHub 热榜问答 Agent。
 
 如果 RAG 中没有相关数据，可以使用 request_crawl 工具请求爬虫更新数据。"""
 
-class QAAgent(BaseAgent):
-    """问答 Agent - 回答用户关于 GitHub 热榜的问题"""
+# 不同性格的 System Prompt 模板
+PERSONALITY_PROMPTS = {
+    "tech": """你是一个技术团队的 AI 助手，专注于 GitHub 热榜项目的技术分析。
 
-    def __init__(self, name: str = "qa", session_store: SQLiteSessionStore = None):
-        super().__init__(name, QA_PROMPT)
+你擅长：
+- 分析项目的技术栈和架构
+- 评估代码质量和技术先进性
+- 关注新兴技术和框架
+- 深入讲解核心代码实现
+
+回答风格：专业、深入、技术细节丰富。""",
+
+    "invest": """你是一个投资团队的 AI 助手，专注于 GitHub 热榜项目的投资价值分析。
+
+你擅长：
+- 评估项目的商业潜力和市场价值
+- 分析项目的用户增长和社区活跃度
+- 关注创始团队背景和融资情况
+- 评估项目的竞争壁垒和护城河
+
+回答风格：商业化视角、简洁有力、重点突出投资价值。""",
+
+    "content": """你是一个内容团队的 AI 助手，专注于 GitHub 热榜项目的内容创作。
+
+你擅长：
+- 提炼项目亮点和创新点
+- 撰写吸引人的项目介绍
+- 用通俗易懂的语言解释技术概念
+- 策划项目推广内容
+
+回答风格：生动有趣、通俗易懂、适合大众传播。""",
+
+    "product": """你是一个产品团队的 AI 助手，专注于 GitHub 热榜项目的产品分析。
+
+你擅长：
+- 分析产品的功能特性和用户体验
+- 评估产品的市场定位和目标用户
+- 关注产品的迭代速度和方向
+- 分析竞品对比和差异化
+
+回答风格：产品视角、注重体验、关注用户价值。""",
+}
+
+def get_personality_prompt(personality: str = "tech") -> str:
+    """获取指定性格的 System Prompt"""
+    personality_part = PERSONALITY_PROMPTS.get(personality, PERSONALITY_PROMPTS["tech"])
+    return f"{personality_part}\n\n{QA_PROMPT_BASE}"
+
+class QAAgent(BaseAgent):
+    """问答 Agent - 回答用户关于 GitHub 热榜的问题
+
+    支持多 Bot 性格配置：
+    - 通过 personality 参数指定性格 (tech/invest/content/product)
+    - 不同性格有不同的 System Prompt
+    """
+
+    def __init__(self, name: str = "qa", session_store: SQLiteSessionStore = None,
+                 personality: str = "tech"):
+        """
+        初始化 QAAgent
+
+        Args:
+            name: Agent 名称
+            session_store: 可选的会话存储
+            personality: 性格配置，可选 tech/invest/content/product
+        """
+        # 根据 personality 生成对应的 prompt
+        prompt = get_personality_prompt(personality)
+        super().__init__(name, prompt)
         self.tools = QA_TOOLS
         self.handlers = QA_HANDLERS
+        self.personality = personality
 
         # 会话持久化
         self.session_store = session_store or SQLiteSessionStore(agent_id=name)
@@ -32,7 +98,7 @@ class QAAgent(BaseAgent):
         self._session_messages: List[Dict] = []
 
     def _default_prompt(self) -> str:
-        return QA_PROMPT
+        return get_personality_prompt(self.personality)
 
     def create_session(self, title: str = None) -> str:
         """创建新会话"""

@@ -1,6 +1,6 @@
 # CLAUDE.md
 
-本文件为 Claude Code (claude.ai/code) 在本项目中工作时提供指导。
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
 ## 项目概述
 
@@ -53,9 +53,11 @@ python src/main.py
 - **Channels** (`src/channels/`): CLI, Email, Feishu
   - InboundMessage 数据类统一消息格式
   - 邮件支持 SMTP 发送和 IMAP 接收（轮询）
+  - **多 Bot 支持**：FeishuChannel 管理多个 Bot 实例
 
 - **Gateway** (`src/gateway/`): 消息路由到对应 Agent
-  - 绑定表支持 channel/account/peer 路由
+  - **5 层 BindingTable 路由**：T1(peer_id) → T2(guild_id) → T3(account_id) → T4(channel) → T5(default)
+  - `add_bot_binding()` 方法支持 T3 级别 account_id 路由
 
 - **Delivery** (`src/delivery/`): 后台消息队列，支持重试
   - 指数退避: [5, 25, 120, 600] 秒
@@ -77,9 +79,52 @@ python src/main.py
   - 主线程 (main lane): max_concurrency=1，确保 CLI 交互顺序执行
   - 后台任务 (background lane): 定时爬取、投递等
 
+### 多 Bot 架构
+
+系统支持同时运行多个独立的飞书 Bot，每个 Bot 有不同的 personality：
+
+```
+用户 → Bot A (app_id=cli_xxx1, personality=tech) → qa_tech-bot Agent
+用户 → Bot B (app_id=cli_xxx2, personality=invest) → qa_invest-bot Agent
+```
+
+**配置方式** (`config.yaml`):
+```yaml
+bots:
+  - id: "tech-bot"
+    name: "技术团队Bot"
+    feishu:
+      app_id: "cli_xxx1"
+      app_secret: "xxx"
+      bot_open_id: "oc_xxx1"
+    personality: "tech"
+    agent: "qa"
+  - id: "invest-bot"
+    name: "投资团队Bot"
+    feishu:
+      app_id: "cli_xxx2"
+      app_secret: "xxx"
+      bot_open_id: "oc_xxx2"
+    personality: "invest"
+    agent: "qa"
+```
+
+**路由优先级**:
+1. T1: peer_id (最具体 - 特定用户/会话)
+2. T2: guild_id (群组级别)
+3. T3: account_id ← 多 Bot 关键：每个 Bot 有唯一 app_id
+4. T4: channel (平台级别)
+5. T5: default (最不具体 - 默认路由)
+
+**Personality 类型**:
+- `tech` - 技术团队风格
+- `invest` - 投资团队风格
+- `content` - 内容团队风格
+- `product` - 产品团队风格
+
 ### 配置
 
-- `config.yaml`: 团队配置（tech/invest/content/product）、Agent 配置、Cron 调度
+- `config.yaml`: 团队配置（tech/invest/content/product）、Bot 配置、Agent 配置、Cron 调度
 - `.env`: API 密钥（ANTHROPIC_API_KEY、GITHUB_TOKEN）、SMTP/IMAP 凭证、飞书令牌
 
 ### 团队系统
@@ -100,7 +145,8 @@ python src/main.py
 
 ### 飞书集成
 
-- 需要在飞书开发者后台创建应用并获取 App ID/Secret
+- 支持多 Bot：通过 `bots` 配置或环境变量 `FEISHU_APP_ID`/FEISHU_APP_SECRET
+- 每个 Bot 独立的长连接客户端 (`start_rpc_client_for()`)
 - 机器人需加入群聊后，通过群 ID (chat_id) 发送消息
 - 配置 `feishu_chat_id` 到 config.yaml 的 teams 中
 - 默认使用长连接模式（RPC），不需要公网 URL
@@ -110,10 +156,12 @@ python src/main.py
 ### 环境变量
 
 ```bash
-# 飞书应用凭证
-FEISHU_APP_ID=cli_a930bc37e07a9cc0
+# 飞书应用凭证（单 Bot 模式）
+FEISHU_APP_ID=cli_a930bc37exxx
 FEISHU_APP_SECRET=你的AppSecret
 FEISHU_BOT_OPEN_ID=oc_xxx  # 机器人 ID
+
+# 多 Bot 模式使用 config.yaml 中的 bots 配置
 
 # 接收模式（默认 true 为长连接）
 FEISHU_USE_RPC=true
@@ -121,3 +169,13 @@ FEISHU_USE_RPC=true
 # 日志级别（默认 INFO）
 FEISHU_LOG_LEVEL=INFO
 ```
+
+### 关键实现文件
+
+| 文件 | 职责 |
+|------|------|
+| `src/config.py` | BotConfig, BotFeishuConfig 数据类定义 |
+| `src/main.py` | `init_agents()` 创建多 Bot QAAgent，`init_channels()` 注册多 Bot |
+| `src/channels/feishu.py` | `register_bot()`, `start_rpc_client_for()` 多 Bot 管理 |
+| `src/gateway/routing.py` | `add_bot_binding()` T3 级别 account_id 路由 |
+| `src/agents/qa.py` | `PERSONALITY_PROMPTS` 定义 4 种性格，`get_personality_prompt()` 生成对应 System Prompt |

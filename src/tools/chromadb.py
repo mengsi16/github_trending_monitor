@@ -3,16 +3,35 @@ import chromadb
 from chromadb.config import Settings
 from typing import List, Dict, Any
 import uuid
+from datetime import datetime
 
 class RAGStore:
     def __init__(self, persist_dir: str = None):
         from src.config import config
         self.persist_dir = persist_dir or config.chromadb_dir
         self.client = chromadb.PersistentClient(path=self.persist_dir)
+        self.collection_name = "projects"
         self.collection = self.client.get_or_create_collection(
-            name="projects",
+            name=self.collection_name,
             metadata={"description": "GitHub trending projects"}
         )
+
+    def reset_collection(self) -> None:
+        """删除并重建项目集合。"""
+        try:
+            self.client.delete_collection(self.collection_name)
+        except Exception:
+            # collection 可能不存在，忽略即可
+            pass
+
+        self.collection = self.client.get_or_create_collection(
+            name=self.collection_name,
+            metadata={"description": "GitHub trending projects"}
+        )
+
+    def count(self) -> int:
+        """当前集合文档数量。"""
+        return self.collection.count()
 
     def add_project(self, project_data: Dict) -> str:
         """添加项目记录（保留历史）"""
@@ -22,7 +41,10 @@ class RAGStore:
         项目: {project_data.get('repo_name')}
         描述: {project_data.get('description', '')}
         语言: {project_data.get('language', '')}
-        Stars: {project_data.get('stars', 0)}
+        总 Stars: {project_data.get('stars', 0)}
+        趋势新增 Stars: {project_data.get('today_stars', 0)}
+        热榜周期: {project_data.get('since', 'daily')}
+        榜单名次: {project_data.get('rank', 0)}
         主题: {', '.join(project_data.get('topics', []))}
         README: {project_data.get('readme', '')[:5000]}
         """.strip()
@@ -34,7 +56,11 @@ class RAGStore:
                 "repo_id": project_data.get("repo_id"),
                 "repo_name": project_data.get("repo_name"),
                 "crawl_date": project_data.get("crawl_date"),
+                "crawl_ts": project_data.get("crawl_ts"),
                 "stars": project_data.get("stars", 0),
+                "today_stars": project_data.get("today_stars", 0),
+                "since": project_data.get("since", "daily"),
+                "rank": project_data.get("rank", 0),
                 "url": project_data.get("url", ""),
             }]
         )
@@ -58,7 +84,11 @@ class RAGStore:
                     "repo_id": meta.get("repo_id", ""),
                     "repo_name": meta.get("repo_name", ""),
                     "crawl_date": meta.get("crawl_date", ""),
+                    "crawl_ts": meta.get("crawl_ts", ""),
                     "stars": meta.get("stars", 0),
+                    "today_stars": meta.get("today_stars", 0),
+                    "since": meta.get("since", "daily"),
+                    "rank": meta.get("rank", 0),
                     "url": meta.get("url", ""),
                     "content": doc[:1000],
                 })
@@ -80,12 +110,16 @@ class RAGStore:
                     "repo_id": meta.get("repo_id"),
                     "repo_name": meta.get("repo_name"),
                     "crawl_date": meta.get("crawl_date"),
+                    "crawl_ts": meta.get("crawl_ts", ""),
                     "stars": meta.get("stars"),
+                    "today_stars": meta.get("today_stars", 0),
+                    "since": meta.get("since", "daily"),
+                    "rank": meta.get("rank", 0),
                     "url": meta.get("url"),
                     "content": results["documents"][i][:1000] if results["documents"] else "",
                 })
 
-        items.sort(key=lambda x: x.get("crawl_date", ""), reverse=True)
+        items.sort(key=lambda x: x.get("crawl_ts") or x.get("crawl_date", ""), reverse=True)
         return items[:limit]
 
 def tool_rag_search(query: str, top_k: int = 10) -> str:
@@ -98,7 +132,10 @@ def tool_rag_search(query: str, top_k: int = 10) -> str:
 
     output = [f"找到 {len(results)} 个相关项目：\n"]
     for r in results:
-        output.append(f"- {r['repo_name']} ({r['crawl_date']}) ⭐ {r['stars']}")
+        output.append(
+            f"- #{r.get('rank', 0)} {r['repo_name']} ({r['crawl_date']}, {r.get('since', 'daily')}) "
+            f"今日+{r.get('today_stars', 0)} | 总⭐ {r['stars']}"
+        )
         output.append(f"  {r['content'][:200]}...")
         output.append("")
 
@@ -114,14 +151,18 @@ def tool_rag_get_latest(limit: int = 20) -> str:
 
     output = [f"最新 {len(results)} 个项目：\n"]
     for r in results:
-        output.append(f"- {r['repo_name']} ({r['crawl_date']}) ⭐ {r['stars']}")
+        output.append(
+            f"- #{r.get('rank', 0)} {r['repo_name']} ({r['crawl_date']}, {r.get('since', 'daily')}) "
+            f"今日+{r.get('today_stars', 0)} | 总⭐ {r['stars']}"
+        )
         output.append(f"  {r['content'][:150]}")
         output.append("")
 
     return "\n".join(output)
 
 def tool_rag_store(repo_id: str, repo_name: str, description: str, language: str,
-                   stars: int, topics: list, url: str, readme: str = "") -> str:
+                   stars: int, topics: list, url: str, readme: str = "",
+                   since: str = "daily", today_stars: int = 0, rank: int = 0) -> str:
     """存储项目信息到 RAG"""
     from datetime import datetime
     store = RAGStore()
@@ -132,14 +173,25 @@ def tool_rag_store(repo_id: str, repo_name: str, description: str, language: str
         "description": description or "",
         "language": language or "",
         "stars": stars,
+        "today_stars": today_stars,
+        "since": since,
+        "rank": rank,
         "topics": topics or [],
         "url": url,
         "crawl_date": datetime.now().strftime("%Y-%m-%d"),
+        "crawl_ts": datetime.now().isoformat(timespec="seconds"),
         "readme": readme or "",
     }
 
     doc_id = store.add_project(project_data)
     return f"已存储项目: {repo_name} (ID: {doc_id[:8]}...)"
+
+
+def tool_rag_reset() -> str:
+    """删除并重建 Chroma 集合"""
+    store = RAGStore()
+    store.reset_collection()
+    return "已删除并重建 Chroma 集合 projects"
 
 RAG_TOOLS = [
     {
@@ -177,9 +229,21 @@ RAG_TOOLS = [
                 "stars": {"type": "integer", "description": "star 数量"},
                 "topics": {"type": "array", "items": {"type": "string"}, "description": "主题标签"},
                 "url": {"type": "string", "description": "仓库 URL"},
-                "readme": {"type": "string", "description": "README 内容（可选）"}
+                "readme": {"type": "string", "description": "README 内容（可选）"},
+                "since": {"type": "string", "description": "热榜周期：daily/weekly/monthly", "default": "daily"},
+                "today_stars": {"type": "integer", "description": "趋势周期内新增 stars", "default": 0},
+                "rank": {"type": "integer", "description": "榜单排名", "default": 0}
             },
             "required": ["repo_id", "repo_name", "stars", "url"]
+        }
+    },
+    {
+        "name": "rag_reset",
+        "description": "删除并重建 Chroma 项目集合（用于全量刷新）",
+        "input_schema": {
+            "type": "object",
+            "properties": {},
+            "required": []
         }
     }
 ]
@@ -188,4 +252,5 @@ RAG_HANDLERS = {
     "rag_search": tool_rag_search,
     "rag_get_latest": tool_rag_get_latest,
     "rag_store": tool_rag_store,
+    "rag_reset": tool_rag_reset,
 }

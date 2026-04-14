@@ -1,4 +1,5 @@
 """网关路由逻辑 (s05)"""
+import logging
 from ..channels import InboundMessage
 from .binding import BindingTable, Binding
 from src.config import config
@@ -48,3 +49,20 @@ class Gateway:
             match_key="peer_id",
             match_value=f"{channel}:{peer_id}",
         ))
+
+    def add_bot_binding(self, bot_id: str, account_id: str, agent_id: str):
+        """添加 Bot 到 Agent 的路由绑定 (s05 Tier 3)
+
+        Args:
+            bot_id: Bot 配置 ID
+            account_id: 飞书 app_id（用于区分不同 Bot）
+            agent_id: 绑定的 Agent ID
+        """
+        self.bindings.add(Binding(
+            agent_id=agent_id,
+            tier=3,
+            match_key="account_id",
+            match_value=account_id,
+        ))
+        _logger = logging.getLogger("gateway")
+        _logger.info(f"Added bot binding: {bot_id} (account_id={account_id}) -> {agent_id}")

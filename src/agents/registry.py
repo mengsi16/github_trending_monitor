@@ -108,7 +108,8 @@ class AgentRegistry:
         try:
             # 根据 action 调用对应的处理方法
             if action == "run_crawl" and hasattr(target_agent, "run_crawl"):
-                result = target_agent.run_crawl()
+                top_n = payload.get("top_n") if payload else None
+                result = target_agent.run_crawl(top_n=top_n)
                 return AgentResponse(request_id, True, result=result)
             elif action == "generate_summary" and hasattr(target_agent, "generate_summary"):
                 team_id = payload.get("team_id") if payload else None
@@ -161,7 +162,8 @@ class AgentRegistry:
             def _run():
                 try:
                     if action == "run_crawl" and hasattr(target_agent, "run_crawl"):
-                        target_agent.run_crawl()
+                        top_n = payload.get("top_n") if payload else None
+                        target_agent.run_crawl(top_n=top_n)
                     elif hasattr(target_agent, action):
                         method = getattr(target_agent, action)
                         method(**payload) if payload else method()

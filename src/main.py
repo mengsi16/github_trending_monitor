@@ -66,42 +66,137 @@ def signal_handler(sig, frame):
         heartbeat.stop()
 
 def init_agents():
-    """初始化 Agents"""
+    """初始化 Agents
+
+    支持多 Bot 性格配置：
+    - 如果配置了多个 Bot，会创建对应数量的 QAAgent
+    - 每个 QAAgent 有不同的 personality
+    """
+    global gateway
+
     crawler = CrawlerAgent("crawler")
-    qa = QAAgent("qa")
     summarizer = SummarizerAgent("summarizer")
 
-    # 注册到 Gateway
+    # 注册到 Gateway 和 Registry
     gateway.register_agent("crawler", crawler)
-    gateway.register_agent("qa", qa)
     gateway.register_agent("summarizer", summarizer)
-
-    # 注册到 AgentRegistry（支持 Agent 间通信）
     registry.register("crawler", crawler)
-    registry.register("qa", qa)
     registry.register("summarizer", summarizer)
 
-    return crawler, qa, summarizer
+    # 多 Bot 支持：为每个配置的 Bot 创建独立的 QAAgent
+    qa_agents = {}
+
+    # 如果配置了 bots，使用多 Bot 模式
+    if config.bots:
+        for bot_config in config.bots:
+            bot_qa = QAAgent(
+                name=f"qa_{bot_config.id}",
+                personality=bot_config.personality
+            )
+            agent_id = f"qa_{bot_config.id}"
+            gateway.register_agent(agent_id, bot_qa)
+            registry.register(agent_id, bot_qa)
+            qa_agents[bot_config.id] = bot_qa
+
+            # 为 Bot 添加路由绑定（T3: account_id）
+            gateway.add_bot_binding(
+                bot_id=bot_config.id,
+                account_id=bot_config.feishu.app_id,
+                agent_id=agent_id,
+            )
+
+            print(f"[Agent] Registered {bot_config.name} (personality={bot_config.personality}) -> {agent_id}")
+    else:
+        # 单 Bot 模式（兼容旧配置）
+        qa = QAAgent("qa")
+        gateway.register_agent("qa", qa)
+        registry.register("qa", qa)
+        qa_agents["default"] = qa
+
+    # 默认 QA Agent（用于 CLI 等未指定 Bot 的场景）
+    default_qa = qa_agents.get("default") or qa_agents.get(list(qa_agents.keys())[0]) if qa_agents else None
+    if default_qa:
+        gateway.register_agent("qa", default_qa)
+
+    return crawler, default_qa, summarizer
 
 def init_channels():
-    """初始化 Channels"""
+    """初始化 Channels
+
+    支持多 Bot 模式：
+    - 如果配置了 bots，为每个 Bot 注册到 FeishuChannel
+    - 也支持环境变量配置的单 Bot 模式（向后兼容）
+    """
     global email_channel, feishu_channel
 
     cli = CLIChannel()
     gateway.register_agent("cli", cli)
 
     # 飞书 (支持发送和接收)
-    if os.getenv("FEISHU_APP_ID"):
-        feishu_channel = FeishuChannel()
+    feishu_channel = FeishuChannel()
+
+    def _looks_like_placeholder(value: str) -> bool:
+        v = (value or "").strip().lower()
+        if not v:
+            return True
+        placeholders = ["xxx", "your_", "placeholder", "example"]
+        return any(p in v for p in placeholders)
+
+    # 多 Bot 模式：从 config.bots 注册
+    registered_from_config = 0
+    if config.bots:
+        for bot_config in config.bots:
+            app_id = (bot_config.feishu.app_id or "").strip()
+            app_secret = (bot_config.feishu.app_secret or "").strip()
+            if _looks_like_placeholder(app_id) or _looks_like_placeholder(app_secret):
+                print(f"[Feishu] Skip bot {bot_config.id}: invalid/placeholder app_id or app_secret")
+                continue
+
+            feishu_channel.register_bot(
+                bot_id=bot_config.id,
+                app_id=app_id,
+                app_secret=app_secret,
+                bot_open_id=bot_config.feishu.bot_open_id,
+            )
+            print(f"[Feishu] Registered bot: {bot_config.name} (app_id={bot_config.feishu.app_id})")
+            registered_from_config += 1
+
+    # 当 config.bots 全部被跳过时，回退到 .env 的单 Bot 配置（向后兼容）
+    if registered_from_config == 0 and os.getenv("FEISHU_APP_ID"):
+        # 单 Bot 模式：从环境变量读取（向后兼容）
+        feishu_channel.register_bot(
+            bot_id="default",
+            app_id=os.getenv("FEISHU_APP_ID"),
+            app_secret=os.getenv("FEISHU_APP_SECRET"),
+            bot_open_id=os.getenv("FEISHU_BOT_OPEN_ID", ""),
+        )
+        print("[Feishu] Fallback to env single-bot config")
+
+    # 启动飞书（如果有任何 Bot 注册）
+    if feishu_channel._bots:
         delivery_runner.register_sender("feishu", feishu_channel.send)
         # 启动长连接客户端（推荐，不需要公网 URL）
-        # 如需使用 Webhook 模式，设置环境变量 FEISHU_USE_RPC=false
         feishu_channel.start_rpc_client()
+    else:
+        print("[Feishu] No bots configured, skipping Feishu channel")
 
-    # 邮件 (支持发送和接收)
-    if os.getenv("SMTP_HOST") or os.getenv("IMAP_USER"):
+    # 邮件 (按能力启用发送/接收，避免半配置导致持续失败)
+    has_email_env = any(
+        os.getenv(k) for k in ["SMTP_HOST", "SMTP_USER", "SMTP_PASSWORD", "IMAP_USER", "IMAP_PASSWORD"]
+    )
+    if has_email_env:
         email_channel = EmailChannel()
-        delivery_runner.register_sender("email", email_channel.send)
+
+        if getattr(email_channel, "smtp_enabled", False):
+            delivery_runner.register_sender("email", email_channel.send)
+            print("[Email] SMTP sender enabled")
+        else:
+            print("[Email] SMTP not fully configured, sender disabled")
+
+        if getattr(email_channel, "imap_enabled", False):
+            print("[Email] IMAP polling enabled")
+        else:
+            print("[Email] IMAP not fully configured, polling disabled")
 
     return cli
 
@@ -428,6 +523,7 @@ def handle_feishu_request(message: InboundMessage):
     sender = message.sender_id
     peer_id = message.peer_id
     is_group = message.is_group
+    account_id = message.account_id
 
     print(f"[Feishu] 收到来自 {sender} 的消息: {text[:50]}...")
 
@@ -537,8 +633,9 @@ def handle_feishu_request(message: InboundMessage):
         try:
             # 发送到消息来源的 peer_id
             target = peer_id if is_group else sender
-            feishu_channel.send(target, response)
-            print(f"[Feishu] 已回复到 {target}")
+            bot_id = feishu_channel.get_bot_id_by_app_id(account_id)
+            feishu_channel.send(target, response, bot_id=bot_id)
+            print(f"[Feishu] 已回复到 {target} (bot_id={bot_id})")
         except Exception as e:
             print(f"[Feishu] 回复失败: {e}")
 
@@ -551,9 +648,9 @@ def start_email_polling(interval: int = 30):
         print("[Email] 邮件通道未初始化，跳过轮询")
         return
 
-    # 检查 IMAP 是否配置
-    if not email_channel.imap_user:
-        print("[Email] IMAP_USER 未配置，跳过邮件接收")
+    # 检查 IMAP 是否可用
+    if not getattr(email_channel, "imap_enabled", False):
+        print("[Email] IMAP 未完整配置，跳过邮件接收")
         return
 
     print(f"[Email] 启动邮件轮询 (间隔 {interval} 秒)")
@@ -606,6 +703,9 @@ def main():
     if not os.getenv("ANTHROPIC_API_KEY"):
         print("Error: ANTHROPIC_API_KEY not set")
         sys.exit(1)
+
+    # 非交互模式是否保持后台常驻（默认 true）
+    headless_keep_alive = os.getenv("HEADLESS_KEEP_ALIVE", "true").lower() == "true"
 
     # 初始化
     print("Initializing...")
@@ -664,6 +764,14 @@ def main():
             for output in pending:
                 print(f"\n[Heartbeat] {output}\n")
 
+        # 无交互 stdin 场景下，仅保持后台任务运行
+        if not sys.stdin.isatty():
+            if not headless_keep_alive:
+                print("[CLI] Non-interactive stdin detected, exiting (HEADLESS_KEEP_ALIVE=false)")
+                break
+            time.sleep(0.5)
+            continue
+
         # 2. 获取用户输入 (blocking 获取 Lane)
         # 用户输入始终优先 - 即使 Heartbeat 正在等待，也会被优先处理
         lane_lock.acquire()
@@ -673,6 +781,9 @@ def main():
                 break
         finally:
             lane_lock.release()
+
+        if not message.text.strip():
+            continue
 
         # 3. 处理消息 (与之前相同的逻辑)
         if message.text.startswith("/"):

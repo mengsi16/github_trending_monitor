@@ -3,6 +3,7 @@ import os
 import json
 import httpx
 import threading
+import asyncio
 import hashlib
 import hmac
 import base64
@@ -67,12 +68,27 @@ class FeishuChannel(Channel):
     encrypt_key = os.getenv("FEISHU_ENCRYPT_KEY", "")  # 可选的加密 key
 
     def __init__(self):
-        self.app_id = os.getenv("FEISHU_APP_ID")
-        self.app_secret = os.getenv("FEISHU_APP_SECRET")
-        self.bot_open_id = os.getenv("FEISHU_BOT_OPEN_ID")
+        # 多 Bot 支持：存储多个 bot 配置
+        # bot_id -> {app_id, app_secret, bot_open_id, rpc_client, token, token_expires_at}
+        self._bots: dict = {}
+        self._default_bot_id: str = None
+
+        # 单 Bot 兼容：也从环境变量读取（如果配置了）
+        app_id = os.getenv("FEISHU_APP_ID")
+        app_secret = os.getenv("FEISHU_APP_SECRET")
+        bot_open_id = os.getenv("FEISHU_BOT_OPEN_ID")
+        if app_id and app_secret:
+            self._bots["default"] = {
+                "app_id": app_id,
+                "app_secret": app_secret,
+                "bot_open_id": bot_open_id or "",
+                "rpc_client": None,
+                "token": "",
+                "token_expires_at": 0.0,
+            }
+            self._default_bot_id = "default"
+
         self.api_base = "https://open.feishu.cn/open-apis"
-        self._token = ""
-        self._token_expires_at = 0.0
 
         # 消息队列，用于存储接收到的消息
         self._message_queue: list[InboundMessage] = []
@@ -81,30 +97,89 @@ class FeishuChannel(Channel):
         # Webhook 服务器（备用）
         self._server = None
         self._server_thread = None
+        self._rpc_thread = None
+        self._rpc_loop = None
 
-        # 长连接客户端
-        self._rpc_client = None
         self._use_rpc = os.getenv("FEISHU_USE_RPC", "true").lower() == "true"  # 默认使用长连接
         self._running = False
 
-    def _refresh_token(self) -> str:
-        if self._token and time.time() < self._token_expires_at:
-            return self._token
+    def register_bot(self, bot_id: str, app_id: str, app_secret: str, bot_open_id: str = ""):
+        """注册一个新的 Bot 配置（多 Bot 支持）"""
+        self._bots[bot_id] = {
+            "app_id": app_id,
+            "app_secret": app_secret,
+            "bot_open_id": bot_open_id,
+            "rpc_client": None,
+            "token": "",
+            "token_expires_at": 0.0,
+        }
+        if self._default_bot_id is None:
+            self._default_bot_id = bot_id
+        _logger.info(f"Registered bot: {bot_id} (app_id: {app_id})")
+
+    def _get_bot_config(self, bot_id: str = None) -> dict:
+        """获取 Bot 配置"""
+        if bot_id is None:
+            bot_id = self._default_bot_id
+        return self._bots.get(bot_id) or self._bots.get("default", {})
+
+    def get_bot_id_by_app_id(self, app_id: str) -> Optional[str]:
+        """根据 app_id 反查 bot_id，用于按入站 Bot 回发消息。"""
+        if not app_id:
+            return self._default_bot_id
+
+        for bid, bot in self._bots.items():
+            if bot.get("app_id") == app_id:
+                return bid
+
+        return self._default_bot_id
+
+    def _refresh_token(self, bot_id: str = None) -> str:
+        """刷新指定 Bot 的访问令牌"""
+        bot = self._get_bot_config(bot_id)
+        if not bot:
+            return ""
+
+        app_id = bot.get("app_id")
+        app_secret = bot.get("app_secret")
+        token = bot.get("token", "")
+        expires_at = bot.get("token_expires_at", 0.0)
+
+        if token and time.time() < expires_at:
+            return token
 
         try:
             with httpx.Client(timeout=15.0) as client:
                 resp = client.post(
                     f"{self.api_base}/auth/v3/tenant_access_token/internal",
-                    json={"app_id": self.app_id, "app_secret": self.app_secret}
+                    json={"app_id": app_id, "app_secret": app_secret}
                 )
                 data = resp.json()
                 if data.get("code") != 0:
                     return ""
-                self._token = data.get("tenant_access_token", "")
-                self._token_expires_at = time.time() + data.get("expire", 7200) - 300
-                return self._token
+                token = data.get("tenant_access_token", "")
+                expires_at = time.time() + data.get("expire", 7200) - 300
+                bot["token"] = token
+                bot["token_expires_at"] = expires_at
+                return token
         except:
             return ""
+
+    # 兼容旧接口：app_id/app_secret 属性
+    @property
+    def app_id(self) -> str:
+        bot = self._get_bot_config()
+        return bot.get("app_id", "")
+
+    @property
+    def app_secret(self) -> str:
+        bot = self._get_bot_config()
+        return bot.get("app_secret", "")
+
+    @property
+    def bot_open_id(self) -> str:
+        bot = self._get_bot_config()
+        return bot.get("bot_open_id", "")
 
     # -------------------- Webhook 服务器 --------------------
 
@@ -317,13 +392,17 @@ class FeishuChannel(Channel):
 
     # -------------------- 长连接模式 (RPC) --------------------
 
-    def _handle_rpc_message(self, data):
+    def _handle_rpc_message(self, data, bot_id: str = None):
         """处理长连接接收到的消息事件"""
         try:
             # 获取消息内容
             msg = data.event.message
             if not msg:
                 return
+
+            bot = self._get_bot_config(bot_id)
+            bot_open_id = bot.get("bot_open_id", "") if bot else ""
+            app_id = bot.get("app_id", "") if bot else ""
 
             chat_id = msg.chat_id
             chat_type = msg.chat_type
@@ -343,7 +422,7 @@ class FeishuChannel(Channel):
             if not text:
                 return
 
-            _logger.info(f"收到消息 - chat_id: {chat_id}, chat_type: {chat_type}, user: {sender_id}")
+            _logger.info(f"收到消息 - bot: {bot_id}, chat_id: {chat_id}, chat_type: {chat_type}, user: {sender_id}")
             _logger.debug(f"消息内容: {text[:100]}...")
 
             # 检查是否 @ 了机器人（群聊时）
@@ -354,10 +433,10 @@ class FeishuChannel(Channel):
                 for m in mentions:
                     mid = m.get("id", {})
                     if isinstance(mid, dict):
-                        if mid.get("open_id") == self.bot_open_id:
+                        if mid.get("open_id") == bot_open_id:
                             mentioned = True
                             break
-                    elif isinstance(mid, str) and mid == self.bot_open_id:
+                    elif isinstance(mid, str) and mid == bot_open_id:
                         mentioned = True
                         break
                 if not mentioned:
@@ -365,11 +444,12 @@ class FeishuChannel(Channel):
                     return
 
             # 创建 InboundMessage 并添加到队列
+            # 使用 app_id 作为 account_id（用于路由到不同 Bot）
             inbound_msg = InboundMessage(
                 text=text,
                 sender_id=sender_id,
                 channel="feishu",
-                account_id=self.app_id or "",
+                account_id=app_id or "",
                 peer_id=sender_id if chat_type == "p2p" else chat_id,
                 is_group=(chat_type == "group"),
             )
@@ -383,6 +463,7 @@ class FeishuChannel(Channel):
     def start_rpc_client(self):
         """启动长连接客户端（替代 Webhook）
 
+        如果注册了多个 Bot，会为每个 Bot 启动独立的 RPC 连接。
         长连接模式优点：
         - 不需要公网 URL
         - 不需要配置 SSL 证书
@@ -394,8 +475,8 @@ class FeishuChannel(Channel):
             self.start_webhook_server()
             return
 
-        if not self.app_id or not self.app_secret:
-            _logger.warning("APP_ID 或 APP_SECRET 未配置，跳过启动")
+        if not self._bots:
+            _logger.warning("没有注册的 Bot，跳过启动")
             return
 
         # 检查是否启用长连接
@@ -406,63 +487,212 @@ class FeishuChannel(Channel):
 
         _logger.info("========== 长连接模式配置 ==========")
         _logger.info("使用飞书 SDK 长连接接收消息")
-        _logger.info("优点: 不需要公网 URL，不需要 ngrok")
+        _logger.info(f"将启动 {len(self._bots)} 个 Bot 的 RPC 连接")
         _logger.info("====================================")
 
-        # 创建事件处理器
-        def on_event(event):
-            """事件处理回调"""
-            try:
-                # im.message.receive_v1 事件类型
-                if hasattr(event, 'event_type') and event.event_type == 'im.message':
-                    if hasattr(event, 'event') and event.event:
-                        self._handle_rpc_message(event.event)
-            except Exception as e:
-                _logger.error(f"事件处理错误: {e}")
+        if self._rpc_thread and self._rpc_thread.is_alive():
+            _logger.info("RPC 长连接线程已在运行，跳过重复启动")
+            return
 
-        # 构建事件处理器
+        bot_ids: list[str] = []
+        for bot_id in self._bots:
+            bot = self._get_bot_config(bot_id)
+            if not bot:
+                continue
+            if not bot.get("app_id") or not bot.get("app_secret"):
+                _logger.warning(f"Bot {bot_id} 缺少 app_id 或 app_secret，跳过")
+                continue
+            bot_ids.append(bot_id)
+
+        if not bot_ids:
+            _logger.warning("没有可用的 Bot 配置，无法启动 RPC")
+            return
+
+        def run_all_bots_rpc():
+            loop = asyncio.new_event_loop()
+            self._rpc_loop = loop
+            asyncio.set_event_loop(loop)
+
+            try:
+                import lark_oapi.ws.client as ws_client_module
+                ws_client_module.loop = loop
+
+                async def bootstrap_all():
+                    connected = 0
+
+                    for bot_id in bot_ids:
+                        bot = self._get_bot_config(bot_id)
+                        app_id = bot.get("app_id")
+                        app_secret = bot.get("app_secret")
+
+                        def make_message_handler(bid):
+                            def handler(data):
+                                self._handle_rpc_message(data, bot_id=bid)
+                            return handler
+
+                        event_handler = lark.EventDispatcherHandler.builder(
+                            "", ""
+                        ).register_p2_im_message_receive_v1(make_message_handler(bot_id)).build()
+
+                        try:
+                            rpc_client = lark.ws.Client(
+                                app_id,
+                                app_secret,
+                                event_handler=event_handler,
+                                log_level=lark.LogLevel.WARNING
+                            )
+                            bot["rpc_client"] = rpc_client
+                            await rpc_client._connect()
+                            loop.create_task(rpc_client._ping_loop())
+                            connected += 1
+                            _logger.info(f"Bot {bot_id} 长连接客户端已启动，等待消息...")
+                        except Exception as e:
+                            bot["rpc_client"] = None
+                            _logger.error(f"Bot {bot_id} 长连接启动失败: {e}")
+
+                    if connected == 0:
+                        _logger.error("所有 Bot 的长连接启动均失败")
+                        return
+
+                    await ws_client_module._select()
+
+                loop.run_until_complete(bootstrap_all())
+            except Exception as e:
+                _logger.error(f"RPC 长连接线程异常退出: {e}")
+            finally:
+                self._rpc_loop = None
+                asyncio.set_event_loop(None)
+                try:
+                    loop.close()
+                except Exception:
+                    pass
+
+        self._rpc_thread = threading.Thread(target=run_all_bots_rpc, daemon=True)
+        self._rpc_thread.start()
+
+    def start_rpc_client_for(self, bot_id: str):
+        """为指定 Bot 启动长连接客户端
+
+        Args:
+            bot_id: Bot ID
+        """
+        if not LARK_SDK_AVAILABLE:
+            _logger.warning("lark-oapi SDK 未安装，无法启动 RPC")
+            return
+
+        bot = self._get_bot_config(bot_id)
+        if not bot:
+            _logger.warning(f"Bot {bot_id} 未注册，跳过")
+            return
+
+        app_id = bot.get("app_id")
+        app_secret = bot.get("app_secret")
+
+        if not app_id or not app_secret:
+            _logger.warning(f"Bot {bot_id} 缺少 app_id 或 app_secret，跳过")
+            return
+
+        # 创建事件处理器（绑定到特定 bot_id）
+        def make_message_handler(bid):
+            def handler(data):
+                self._handle_rpc_message(data, bot_id=bid)
+            return handler
+
         event_handler = lark.EventDispatcherHandler.builder(
             "", ""  # 长连接模式不需要 encrypt_key 和 verification_token
-        ).register_p2_im_message_receive_v1(self._handle_rpc_message).build()
+        ).register_p2_im_message_receive_v1(make_message_handler(bot_id)).build()
 
         # 启动长连接客户端
         def run_rpc():
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
             try:
-                self._rpc_client = lark.ws.Client(
-                    self.app_id,
-                    self.app_secret,
+                rpc_client = lark.ws.Client(
+                    app_id,
+                    app_secret,
                     event_handler=event_handler,
-                    log_level=lark.LogLevel.WARNING  # 改为 WARNING 减少日志输出
+                    log_level=lark.LogLevel.WARNING
                 )
-                _logger.info("长连接客户端已启动，等待消息...")
-                self._rpc_client.start()
+                bot["rpc_client"] = rpc_client
+                _logger.info(f"Bot {bot_id} 长连接客户端已启动，等待消息...")
+                rpc_client.start()
             except Exception as e:
-                _logger.error(f"长连接启动失败: {e}")
-                _logger.info("回退到 Webhook 模式...")
-                self.start_webhook_server()
+                _logger.error(f"Bot {bot_id} 长连接启动失败: {e}")
+            finally:
+                try:
+                    asyncio.set_event_loop(None)
+                    loop.close()
+                except Exception:
+                    pass
 
         thread = threading.Thread(target=run_rpc, daemon=True)
         thread.start()
 
     def stop_rpc_client(self):
-        """停止长连接客户端"""
-        if self._rpc_client:
-            try:
-                self._rpc_client.stop()
-            except:
-                pass
-            self._rpc_client = None
+        """停止所有长连接客户端"""
+        if self._rpc_loop and self._rpc_loop.is_running():
+            async def shutdown_clients():
+                for bot_id, bot in self._bots.items():
+                    rpc_client = bot.get("rpc_client")
+                    if rpc_client:
+                        try:
+                            await rpc_client._disconnect()
+                            _logger.info(f"Bot {bot_id} RPC 客户端已停止")
+                        except Exception:
+                            pass
+                        bot["rpc_client"] = None
 
-    def send(self, to: str, text: str, **kwargs) -> bool:
-        token = self._refresh_token()
+            try:
+                fut = asyncio.run_coroutine_threadsafe(shutdown_clients(), self._rpc_loop)
+                fut.result(timeout=5)
+            except Exception:
+                pass
+
+            try:
+                self._rpc_loop.call_soon_threadsafe(self._rpc_loop.stop)
+            except Exception:
+                pass
+
+            if self._rpc_thread and self._rpc_thread.is_alive():
+                self._rpc_thread.join(timeout=2)
+
+            self._rpc_thread = None
+            self._rpc_loop = None
+            return
+
+        for bot_id, bot in self._bots.items():
+            rpc_client = bot.get("rpc_client")
+            if rpc_client:
+                try:
+                    rpc_client.stop()
+                    _logger.info(f"Bot {bot_id} RPC 客户端已停止")
+                except:
+                    pass
+                bot["rpc_client"] = None
+
+    def send(self, to: str, text: str, bot_id: str = None, **kwargs) -> bool:
+        """发送消息到飞书
+
+        Args:
+            to: 接收者 ID (chat_id 或 open_id)
+            text: 消息文本
+            bot_id: 可选的 Bot ID，不指定则使用默认 Bot
+        """
+        token = self._refresh_token(bot_id)
         if not token:
             return False
+
+        # 自动识别接收者类型：私聊用户 open_id(ou_)，群聊 chat_id(oc_)
+        # 也支持通过 kwargs 显式覆盖 receive_id_type。
+        receive_id_type = kwargs.get("receive_id_type")
+        if not receive_id_type:
+            receive_id_type = "open_id" if isinstance(to, str) and to.startswith("ou_") else "chat_id"
 
         try:
             with httpx.Client(timeout=15.0) as client:
                 resp = client.post(
                     f"{self.api_base}/im/v1/messages",
-                    params={"receive_id_type": "chat_id"},
+                    params={"receive_id_type": receive_id_type},
                     headers={"Authorization": f"Bearer {token}"},
                     json={
                         "receive_id": to,
