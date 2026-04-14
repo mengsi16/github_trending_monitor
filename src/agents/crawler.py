@@ -32,13 +32,17 @@ class CrawlerAgent(BaseAgent):
         if not projects:
             return "爬取失败：未获取到 GitHub Trending 数据"
 
-        store.reset_collection()
+        try:
+            store.reset_collection()
+        except Exception as e:
+            return f"爬取失败：Chroma 重建失败 - {e}"
 
         crawl_date = datetime.now().strftime("%Y-%m-%d")
         crawl_ts = datetime.now().isoformat(timespec="seconds")
 
         stored = 0
         errors = []
+        write_errors = []
         for rank, project in enumerate(projects, 1):
             owner = project.get("owner", "")
             repo = project.get("repo", "")
@@ -66,22 +70,25 @@ class CrawlerAgent(BaseAgent):
             except Exception:
                 readme = ""
 
-            store.add_project({
-                "repo_id": full_name,
-                "repo_name": full_name,
-                "description": details.get("description") or project.get("description", ""),
-                "language": details.get("language") or project.get("language", ""),
-                "stars": details.get("stars", project.get("stargazers_count", 0)),
-                "today_stars": project.get("trending_stars", 0),
-                "since": project.get("since", "daily"),
-                "rank": rank,
-                "topics": details.get("topics", []),
-                "url": details.get("url") or project.get("url", f"https://github.com/{full_name}"),
-                "crawl_date": crawl_date,
-                "crawl_ts": crawl_ts,
-                "readme": readme,
-            })
-            stored += 1
+            try:
+                store.add_project({
+                    "repo_id": full_name,
+                    "repo_name": full_name,
+                    "description": details.get("description") or project.get("description", ""),
+                    "language": details.get("language") or project.get("language", ""),
+                    "stars": details.get("stars", project.get("stargazers_count", 0)),
+                    "today_stars": project.get("trending_stars", 0),
+                    "since": project.get("since", "daily"),
+                    "rank": rank,
+                    "topics": details.get("topics", []),
+                    "url": details.get("url") or project.get("url", f"https://github.com/{full_name}"),
+                    "crawl_date": crawl_date,
+                    "crawl_ts": crawl_ts,
+                    "readme": readme,
+                })
+                stored += 1
+            except Exception as e:
+                write_errors.append(f"{full_name}: {e}")
 
         lines = [
             f"已完成 GitHub Trending 爬取（daily）。",
@@ -99,5 +106,9 @@ class CrawlerAgent(BaseAgent):
         if errors:
             lines.append("")
             lines.append(f"解析异常: {len(errors)} 条（示例: {errors[0]}）")
+
+        if write_errors:
+            lines.append("")
+            lines.append(f"写入异常: {len(write_errors)} 条（示例: {write_errors[0]}）")
 
         return "\n".join(lines)

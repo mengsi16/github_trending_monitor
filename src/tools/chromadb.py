@@ -20,14 +20,20 @@ class RAGStore:
         """删除并重建项目集合。"""
         try:
             self.client.delete_collection(self.collection_name)
-        except Exception:
-            # collection 可能不存在，忽略即可
-            pass
+        except Exception as e:
+            # 仅在 collection 不存在时忽略，其他错误应向上抛出
+            err = str(e).lower()
+            not_found_markers = ["does not exist", "not found", "unknown collection"]
+            if not any(marker in err for marker in not_found_markers):
+                raise
 
         self.collection = self.client.get_or_create_collection(
             name=self.collection_name,
             metadata={"description": "GitHub trending projects"}
         )
+
+        if self.collection.count() != 0:
+            raise RuntimeError("重建 Chroma 集合失败：新集合不是空状态")
 
     def count(self) -> int:
         """当前集合文档数量。"""
