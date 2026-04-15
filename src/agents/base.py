@@ -1,6 +1,8 @@
 """Agent 基类 (s01)"""
 import os
 import json
+import time
+import random
 import logging
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional
@@ -85,6 +87,39 @@ class BaseAgent(ABC):
             self.client = Anthropic(api_key=api_key)
 
         self._channel = None
+
+    def _call_api(self, **kwargs):
+        """调用 Anthropic API（使用 streaming + 指数退避重试）"""
+        max_retries = 5
+        base_delay = 2.0
+
+        for attempt in range(max_retries + 1):
+            try:
+                with self.client.messages.stream(**kwargs) as stream:
+                    return stream.get_final_message()
+            except Exception as e:
+                if attempt >= max_retries or not self._is_retryable(e):
+                    raise
+                delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
+                _logger.warning(
+                    f"[{self.name}] API 调用失败 (尝试 {attempt + 1}/{max_retries + 1}), "
+                    f"{delay:.1f}s 后重试: {e}"
+                )
+                time.sleep(delay)
+
+    @staticmethod
+    def _is_retryable(error: Exception) -> bool:
+        """判断是否为可重试的瞬态错误（服务器繁忙/限流/超时等）"""
+        err_str = str(error).lower()
+        retryable_keywords = [
+            "overloaded", "rate_limit", "rate limit",
+            "server_error", "server error", "internal server error",
+            "service unavailable", "bad gateway",
+            "busy", "繁忙", "timeout", "timed out",
+            "connection", "temporarily",
+            "529", "502", "503", "500",
+        ]
+        return any(kw in err_str for kw in retryable_keywords)
 
     def set_channel(self, channel):
         """设置消息通道，用于发送回复"""
@@ -175,9 +210,9 @@ class BaseAgent(ABC):
             iteration += 1
 
             try:
-                # 使用 CircuitBreaker 包装 API 调用
+                # 使用 CircuitBreaker 包装 API 调用（streaming 避免超时）
                 response = self.circuit_breaker.execute(
-                    self.client.messages.create,
+                    self._call_api,
                     model=self.model,
                     max_tokens=self.max_tokens,
                     system=system_prompt,
@@ -186,9 +221,7 @@ class BaseAgent(ABC):
                 )
             except CircuitBreakerOpenError:
                 raise
-            except Exception as e:
-                # 记录失败
-                self.circuit_breaker.record_failure(str(e))
+            except Exception:
                 raise
 
             # 序列化内容块（支持多种模型）

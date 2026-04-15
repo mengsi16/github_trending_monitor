@@ -2,9 +2,110 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## 最高优先级约束：默认只能添加 Tools，禁止随意改动主体
+
+- **默认扩展路径**：后续新增功能，默认只能通过 `src/tools/` 下新增或增强 Tools 实现。
+- **禁止随意改主体**：除非需求明确要求改变 Agent 主流程、消息路由、频道接入、调度、会话机制、配置结构或程序入口，否则不得修改主体代码。
+- **必须先证明 Tools 不够**：如果确实需要改主体，必须先说明为什么只加 Tools 无法完成，再进行最小范围改动。
+- **优先最小改动**：能通过新增 Tool handler、补充 Tool schema、增强 Tool 内部存储/检索逻辑解决的问题，不得下沉到 Agent、Gateway、Channel、Scheduler 等主体模块。
+
+## 主体定义（默认不得变动）
+
+以下目录与文件属于本项目主体，默认禁止为“新增功能”而直接修改：
+
+### 目录级主体
+
+- **`src/agents/`**：Agent 主循环、Prompt 装配、会话接入、Agent 间通信骨架
+- **`src/channels/`**：CLI / Email / Feishu 渠道接入与消息收发
+- **`src/gateway/`**：消息绑定、路由分发、多 Bot 映射
+- **`src/delivery/`**：异步投递、失败重试、落盘机制
+- **`src/scheduler/`**：Cron 调度与 Heartbeat 主动任务
+- **`src/sessions/`**：会话持久化、恢复、守卫逻辑
+- **`src/intelligence/`**：上下文压缩、Prompt/Memory 相关能力
+- **`src/resilience/`**：熔断、重试等韧性机制
+- **`src/concurrency/`**：Lane 并发隔离机制
+
+### 文件级主体
+
+- **入口与配置**
+  - `src/main.py`
+  - `src/config.py`
+- **Agents**
+  - `src/agents/base.py`
+  - `src/agents/crawler.py`
+  - `src/agents/qa.py`
+  - `src/agents/summarizer.py`
+  - `src/agents/registry.py`
+  - `src/agents/circuit_breaker.py`
+- **Channels**
+  - `src/channels/base.py`
+  - `src/channels/cli.py`
+  - `src/channels/email.py`
+  - `src/channels/feishu.py`
+- **Gateway**
+  - `src/gateway/binding.py`
+  - `src/gateway/routing.py`
+- **Delivery**
+  - `src/delivery/queue.py`
+  - `src/delivery/runner.py`
+- **Scheduler**
+  - `src/scheduler/cron.py`
+  - `src/scheduler/heartbeat.py`
+- **Sessions**
+  - `src/sessions/store.py`
+  - `src/sessions/sqlite_store.py`
+  - `src/sessions/guard.py`
+- **Intelligence**
+  - `src/intelligence/compactor.py`
+  - `src/intelligence/memory.py`
+  - `src/intelligence/prompt.py`
+- **Resilience**
+  - `src/resilience/circuit_breaker.py`
+  - `src/resilience/retry.py`
+- **Concurrency**
+  - `src/concurrency/lane.py`
+
+### 允许优先扩展的区域
+
+- **`src/tools/`**：功能新增的第一落点
+- **`src/tools/__init__.py`**：Tool 聚合与暴露
+
+## 如何添加 Tools（新增功能的标准方式）
+
+当需要新增能力时，默认按下面路径实施，不要先改主体：
+
+1. **先判断归属**
+   - GitHub 拉取相关能力，优先放到 `src/tools/github.py`
+   - RAG / 存储 / 检索 / 变化分析，优先放到 `src/tools/chromadb.py`
+   - Agent 间请求，优先放到 `src/tools/agent_tools.py`
+   - 邮件 / 飞书辅助能力，优先放到 `src/tools/email.py` 或 `src/tools/feishu.py`
+
+2. **在 Tool 模块内实现 handler**
+   - 新增 `tool_xxx(...)` 函数
+   - 需要复杂逻辑时，把复杂逻辑收敛到 Tool 内部 helper / store 方法，不要把逻辑塞进 Agent 主体
+
+3. **注册 Tool schema 与 handler**
+   - 在对应模块的 `*_TOOLS` 中增加 schema
+   - 在对应模块的 `*_HANDLERS` 中增加 handler 映射
+
+4. **通过 `src/tools/__init__.py` 暴露**
+   - 如果 QA / Summarizer / 其他 Agent 需要使用该 Tool，再在 `src/tools/__init__.py` 聚合到对应工具集
+   - 默认优先补 Tool 集，不要先改 Agent 逻辑
+
+5. **只有在下面情况才允许动主体**
+   - 需要新增新的命令入口或交互协议
+   - 需要改变 Agent 主循环、Prompt 结构或会话策略
+   - 需要改变路由、调度、投递、渠道生命周期
+   - 需要调整配置 schema、初始化流程或系统级依赖关系
+
+6. **改主体时必须记录理由**
+   - 改了哪些主体文件
+   - 为什么只加 Tools 做不到
+   - 改动范围为何已经最小化
+
 ## 项目概述
 
-GitHub Trending Monitor 是一个 AI Agent 监控系统，用于爬取 GitHub 热榜项目、生成团队定制化总结，并通过多渠道（邮件、飞书、CLI）推送给用户。同时支持用户使用自然语言查询历史热榜数据。
+GitHub Trending Monitor 是一个 AI Agent 监控系统，用于爬取 GitHub 热榜项目、生成团队定制化总结，并通过多渠道（邮件、飞书、CLI）推送给用户。同时支持用户使用自然语言查询历史热榜数据、对同仓库做去重与版本化存储，并分析项目内容变化。
 
 ## 常用命令
 
@@ -40,6 +141,55 @@ python src/main.py
 /send feishu summarize tech                 # 发送到配置的飞书群（指定团队）
 /send feishu crawl                          # 发送爬取结果到飞书
 ```
+
+## 最近一次迭代遇到的问题与解决方式
+
+### 1. `/crawl` 会清空旧内容，知识库无法保留历史
+
+- **问题**：爬虫路径里会重建 Chroma collection，导致旧内容被删除。
+- **解决**：停止在 crawl 主路径中重置 collection，改为保留历史记录；存储模型调整为 `latest` + `snapshot` 双记录结构。
+- **结果**：当前知识库既能保留历史，又能保证日常检索只面向最新版本。
+
+### 2. 同一个仓库会被重复无脑写入
+
+- **问题**：之前没有基于 repo 级别去重，也没有内容变化判断。
+- **解决**：在 `src/tools/chromadb.py` 中引入 `repo_id`、`content_signature`、`record_type`、`change_status` 等机制。
+- **结果**：同仓库现在分为 `new / updated / unchanged` 三类；只有内容变化时才新增 `snapshot`。
+
+### 3. `summarize` 没有在 crawl 后默认触发，且报错不够可见
+
+- **问题**：crawl 与 summarize 没有被统一成稳定流水线，失败时日志信息也不够明确。
+- **解决**：把 crawl 后自动 summarize 的逻辑串起来，并补充更清晰的异常输出与日志记录。
+- **结果**：CLI / 消息入口的 crawl 流程更符合预期，失败时更容易定位。
+
+### 4. QA 不是 summarize-only，但缺少更稳的 RAG 检索增强
+
+- **问题**：QA 原本可以用 RAG 回答问题，但检索主要依赖原始 query，缺少轻量 query 改写。
+- **解决**：保持 Agent 主体不变，把 query 改写、多变体检索、结果合并去重都放进 `src/tools/chromadb.py` 的 Tool 层。
+- **结果**：现在 QA 仍然走原主体，但已经具备更实用的 `RAG search -> answer` 能力。
+
+### 5. 只想要项目变化分析，不想引入指标时序复杂度
+
+- **问题**：需要分析项目内容变化，但不需要星数/排名曲线系统。
+- **解决**：继续走 Tool-first 路径，在 `src/tools/chromadb.py` 中新增变化分析能力与 `rag_analyze_changes` Tool。
+- **结果**：可以分析单个项目或最近一批项目的描述、语言、Topics、README 变化，而无需改 Agent 主体。
+
+### 6. README 截断阈值不一致
+
+- **问题**：不同位置对 README 的截断长度不一致，容易导致签名判断和返回结果不统一。
+- **解决**：统一为 8000 字截断，并在存储与 GitHub Tool 层同步规则。
+- **结果**：README 入库、签名计算和直接读取的行为保持一致。
+
+### 7. 测试时暴露出循环导入问题
+
+- **问题**：`src.tools` 与 `src.agents.registry` 的导入链在测试中触发循环依赖。
+- **解决**：将 `src/tools/agent_tools.py` 中的 registry 获取改为懒加载。
+- **结果**：测试恢复稳定，且没有扩大主体改动范围。
+
+### 8. 这次迭代验证出的开发原则
+
+- **结论**：去重、版本化存储、变化分析、轻量 query 改写，这些能力都可以优先通过 Tools 落地。
+- **要求**：后续继续遵守“默认只加 Tools，不改主体”的原则；如果要改主体，必须先论证 Tools 路径失效。
 
 ## 架构
 
@@ -157,7 +307,7 @@ bots:
 
 ```bash
 # 飞书应用凭证（单 Bot 模式）
-FEISHU_APP_ID=cli_a930bc37exxx
+FEISHU_APP_ID=cli_a9xxxx7exxx
 FEISHU_APP_SECRET=你的AppSecret
 FEISHU_BOT_OPEN_ID=oc_xxx  # 机器人 ID
 

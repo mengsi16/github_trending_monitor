@@ -2,170 +2,235 @@
 
 # GitHub Trending Monitor
 
-*自动追踪 GitHub 热榜，按团队视角生成总结，并通过多渠道推送。*
+*自动追踪 GitHub 热榜，保留项目版本历史，并按团队视角生成总结与问答。*
 
 [![Python](https://img.shields.io/badge/Python-3.12-blue)](https://www.python.org/)
 [![Architecture](https://img.shields.io/badge/Architecture-ReAct%20Agent-green)](README.md)
 [![Channels](https://img.shields.io/badge/Channels-Email%20%7C%20Feishu%20%7C%20CLI-orange)](README.md)
 [![Storage](https://img.shields.io/badge/Storage-ChromaDB%20%2B%20SQLite-red)](README.md)
 
-> 面向技术、投资、内容、产品四类角色的 GitHub Trending 智能监控与分析系统。
+[简体中文](README.md) | [English](README_en.md)
+
+> 面向技术、投资、内容、产品四类角色的 GitHub Trending 智能监控、总结、问答与变化分析系统。
 
 </div>
 
 ---
 
-## 项目背景与目标
+## 项目概览
 
-GitHub Trending Monitor 是一个 AI Agent 监控系统，旨在帮助团队自动化追踪 GitHub 热榜项目并生成定制化报告。系统每天定时爬取 GitHub 热门项目，通过 AI 生成符合不同团队需求的总结内容，最终通过邮件、飞书或 CLI 渠道推送给相关人员。同时，系统支持用户以自然语言查询历史热榜数据，形成完整的从信息获取到智能分析的闭环。
+GitHub Trending Monitor 是一个以 Agent 为核心的 GitHub 热榜监控系统。它会抓取 Trending 项目、补充仓库详情与 README、将结果写入 ChromaDB，并基于不同团队的关注点生成总结、回复问答、分析项目变化，再通过 CLI、邮件或飞书交付给用户。
 
-本项目的核心价值在于解决信息过载问题。工程师、投资人、内容创作者和产品经理对 GitHub 热榜的关注点完全不同，系统需要针对不同角色生成差异化的摘要内容，而不是千篇一律的列表。
+这个项目的重点不是单次抓取，而是把“热榜信息流”沉淀成一个可查询、可比较、可追踪变化的知识库。相比只保存当日快照的方案，当前实现更强调以下两点：
+
+- **去重与历史保留**：同一个仓库不会被重复无意义写入；只有内容发生变化时才保留新的历史快照。
+- **面向使用场景的输出**：技术、投资、内容、产品团队可以使用同一份底层数据，但得到不同风格的结论与回答。
 
 ---
 
-## 功能需求
+## 核心能力
 
-### 定时任务与数据采集
+### 热榜抓取与版本化存储
 
-系统通过 Cron 表达式配置定时任务，默认每天上午 9 点执行爬虫获取 GitHub 热榜数据。爬虫使用 GitHub API 或网页爬取方式获取 Top 20 项目，采集字段包括项目名称、描述、编程语言、star 数量、fork 数量、贡献者数量等基础信息。每次爬取结果存入 ChromaDB 向量数据库，保留历史记录供后续查询使用。爬虫任务具备熔断机制，当 GitHub API 请求失败或达到限流阈值时，系统不会持续重试导致资源浪费。
+系统会抓取 GitHub Trending 项目，并为每个仓库维护两类记录：
 
-### 多团队多风格总结
+| 记录类型 | 作用 |
+|------|------|
+| `latest` | 当前最新版本，只保留一条，用于日常检索和总结 |
+| `snapshot` | 仅在描述、语言、Topics、README 等内容发生变化时新增，用于保留历史 |
 
-系统内置四个预定义团队：技术团队、投资团队、内容团队和产品团队，每个团队有独立的推送渠道和总结风格。
+当前去重策略基于 `repo_id` 和 `content_signature`：
+
+- **同仓库首次出现**：记为 `new`，写入 `latest`，同时创建首个 `snapshot`
+- **仅指标变化**：记为 `unchanged`，只更新 `latest` 中的排名、星数、批次等动态字段
+- **内容变化**：记为 `updated`，更新 `latest`，并新增一条 `snapshot`
+
+默认检索和问答只面向 `latest` 记录，避免历史版本污染当前 RAG 结果。README 内容在入库和签名计算时统一截断到 **8000 字**，控制向量长度与重复噪声。
+
+### 多团队总结与自动化投递
+
+系统内置四个团队视角，每个团队共享一套抓取数据，但拥有不同的总结重点：
 
 | 团队 | 关注重点 |
 |------|----------|
-| 技术团队 | 技术栈新颖性、代码质量、架构设计 |
-| 投资团队 | 项目商业潜力、市场估值、竞争格局 |
-| 内容团队 | 项目传播性、内容创作素材 |
-| 产品团队 | 产品定位、用户体验、发展趋势 |
+| 技术团队 | 技术栈、架构、实现思路、工程价值 |
+| 投资团队 | 商业潜力、社区热度、增长信号、竞争态势 |
+| 内容团队 | 可传播亮点、叙事角度、内容素材 |
+| 产品团队 | 用户场景、产品定位、体验与趋势 |
 
-总结生成器根据团队 ID 选择对应的 Prompt 模板，生成符合角色预期的结构化摘要。
+总结可以按团队单独生成，也可以一次生成全部团队版本，并通过邮箱、飞书或 CLI 输出。系统也支持 crawl 与 summarize 组成统一流水线，减少手工串联操作。
 
-### 多渠道消息推送
+### 自然语言问答与 RAG 检索
 
-系统支持三种推送渠道：邮件、飞书和 CLI。
+项目内置 QA Agent，支持针对历史热榜数据做自然语言问答，而不只是生成 summarize。当前问答链路包含：
 
-| 渠道 | 能力 |
+- **RAG 检索**：基于 ChromaDB 对 `latest` 记录进行语义搜索
+- **轻量 Query 改写**：`rag_search` 会自动提取 repo 名、清洗停用词、构造多个检索变体并合并去重
+- **会话持久化**：QA 会话保存在 SQLite 中，可继续历史对话
+- **自动补数**：当知识库为空或不足时，QA 可以请求触发爬虫更新
+
+这意味着系统已经具备“先查 RAG，再回答用户问题”的能力，而不仅仅是 summarize-only 的管道。
+
+### 项目变化分析
+
+除了保存历史，系统还可以分析“这个项目相比上一个版本发生了什么变化”。当前变化分析聚焦于**内容变化**，而不是指标曲线：
+
+- **描述变化**
+- **语言变化**
+- **Topics 变化**
+- **README 变化**
+
+最新批次的 crawl 结果会输出 `new / updated / unchanged` 统计；同时，`rag_analyze_changes` 工具可以分析单个仓库或最近一批变化项目，为问答和后续扩展提供基础能力。
+
+### 多 Bot、多渠道与会话隔离
+
+系统支持多个飞书 Bot 共享同一进程运行，但使用不同的 `app_id`、personality 与会话上下文。邮件、飞书、CLI 共用同一套 Agent 与路由体系。
+
+- **多 Bot 路由**：通过 `account_id` 将不同飞书机器人路由到对应 Agent
+- **多渠道接入**：CLI、Email、Feishu 使用统一的消息分发逻辑
+- **会话隔离**：每个 QA 实例维护独立会话，不互相污染
+- **失败重试**：消息投递支持队列、重试和失败持久化
+
+---
+
+## 数据与检索策略
+
+为了兼顾“保留历史”和“检索干净”，当前实现采用如下约束：
+
+| 目标 | 策略 |
 |------|------|
-| 邮件 | SMTP 发送总结、IMAP 接收指令并自动回复 |
-| 飞书 | 长连接 RPC 或 Webhook 接收消息，支持群聊/单聊，需 @ 机器人触发 |
-| CLI | 交互式命令行，支持 /crawl、/summarize 等命令 |
+| 避免同仓库重复堆积 | 用 `repo_id` 标识唯一仓库 |
+| 只在内容变化时保留历史 | 用 `content_signature` 判定版本变化 |
+| 防止 RAG 被旧版本干扰 | `search()` 与 `get_latest()` 默认只查 `record_type=latest` |
+| 让变化可解释 | 在 metadata 中保留描述、语言、topics、README 签名等字段 |
 
-所有渠道共享同一个消息队列系统，发送失败时自动按照指数退避策略重试，最大重试次数为 5 次，失败消息持久化到本地等待人工处理。
+这套设计适合“知识库 + 变化分析”的场景；如果未来需要做星数曲线、排名时序分析，可以在不破坏现有结构的前提下增加独立的 metrics history 存储层。
 
-### 多机器人独立部署
+---
 
-系统支持同时运行多个独立的飞书机器人，每个机器人有独立的 personality 配置：
+## 交互方式
 
-- **T3 路由机制**：通过 account_id（飞书 app_id）区分不同 Bot，路由到对应的 Agent 实例
-- **独立 Personality**：每个 Bot 可配置 tech/invest/content/product 四种性格之一
-- **会话隔离**：每个 Bot 对应独立的 QAAgent 实例，会话互不干扰
-- **单进程架构**：多 Bot 共享同一进程，简化部署和维护
+### CLI 命令
 
-配置示例：
-```yaml
-bots:
-  - id: "tech-bot"
-    feishu:
-      app_id: "cli_xxx1"
-      app_secret: "xxx"
-    personality: "tech"  # 技术风格
-    agent: "qa"
-  - id: "invest-bot"
-    feishu:
-      app_id: "cli_xxx2"
-      app_secret: "xxx"
-    personality: "invest"  # 投资风格
-    agent: "qa"
+当前 CLI 入口为 `python src/main.py`，启动后可使用以下命令：
+
+| 命令 | 说明 |
+|------|------|
+| `/crawl` | 手动触发抓取流程，CLI 中默认会继续执行自动总结 |
+| `/summarize [team]` | 生成全部团队或指定团队总结 |
+| `/compact [N]` | 手动压缩上下文，保留最近 N 轮对话 |
+| `/sessions` | 查看历史会话 |
+| `/session <id>` | 恢复指定会话 |
+| `/new` | 创建新会话 |
+| `/status` | 查看 QA Agent 的 Circuit Breaker 状态 |
+| `/send ...` | 将总结、爬取结果或自定义消息发送到邮箱或飞书 |
+| `/quit` | 退出程序 |
+
+### 邮件与飞书指令
+
+| 渠道 | 指令 |
+|------|------|
+| 邮件 | `summarize`、`crawl`、`ask <问题>`、`help` |
+| 飞书 | `@机器人 summarize`、`@机器人 crawl`、`@机器人 ask <问题>`、`@机器人 help` |
+
+问答请求最终都会进入 QA Agent，因此可以直接通过自然语言询问某个项目是什么、有哪些热门项目、最近什么变了等问题。
+
+---
+
+## 快速开始
+
+### 1. 安装依赖
+
+推荐使用 Python 3.12。
+
+```bash
+pip install -r requirements.txt
 ```
 
-### 自然语言问答
+### 2. 准备配置文件
 
-系统内置 QA Agent，基于 RAG（检索增强生成）架构实现历史热榜数据的自然语言查询。用户可以用中文或英文提问，系统从 ChromaDB 中检索相关的热榜记录，结合 LLM 生成回答。QA Agent 维护独立的会话上下文，支持多轮对话，并且提供会话持久化功能，用户下次启动时可以加载历史会话继续对话。
+- 复制 `config.example.yaml` 为 `config.yaml`
+- 复制 `.env.example` 为 `.env`
 
-### 上下文压缩
+最少需要配置：
 
-由于 AI 对话有上下文长度限制，系统实现三层上下文压缩机制：
+- **LLM**：`ANTHROPIC_API_KEY`
+- **可选兼容网关**：`ANTHROPIC_BASE_URL`
+- **GitHub**：`GITHUB_TOKEN`（可选，但建议配置）
+- **邮件**：SMTP / IMAP 相关配置（如需邮件收发）
+- **飞书**：App 凭证与 Webhook 配置（如需飞书机器人）
 
-- **Micro 压缩**：针对单轮对话中的冗余内容进行精简
-- **Auto 压缩**：对话达到一定轮数后自动触发，提取早期对话要点
-- **Full 压缩**：用户手动输入 `/compact N` 强制压缩，并保留最近 N 轮完整对话
+### 3. 配置团队与 Bot
 
-压缩后的上下文会存入 SQLite 数据库永久保存。
-
----
-
-## 技术架构
-
-### Agent 架构
-
-系统采用 ReAct（Reasoning + Acting）模式的 Agent 设计，核心组件包括 CrawlerAgent、SummarizerAgent 和 QAAgent。CrawlerAgent 负责与 GitHub API 交互并处理爬取结果；SummarizerAgent 调用 LLM 生成团队定制化总结；QAAgent 处理用户问答请求并管理会话。Agent 之间通过 AgentRegistry 进行通信，可相互调用对方暴露的工具或方法。
-
-### 网关与路由
-
-Gateway 是消息路由的核心枢纽，接收来自各个 Channel 的 InboundMessage，根据消息来源、目标账户和渠道类型决定将消息路由到哪个 Agent 处理。
-
-系统采用 **5 层 BindingTable 路由机制**，按优先级从高到低：
-
-| 层级 | 匹配键 | 说明 |
-|------|--------|------|
-| T1 | peer_id | 最具体 - 特定用户/会话 |
-| T2 | guild_id | 群组级别 |
-| T3 | account_id | Bot 的 app_id，多 Bot 路由关键 |
-| T4 | channel | 平台级别（email/feishu/cli） |
-| T5 | default | 最不具体 - 默认路由 |
-
-这种分层设计使得系统可以灵活处理各种消息路由场景：从特定 Bot 的消息路由到对应 Agent，到按渠道类型的默认路由。
-
-### 消息投递
-
-Delivery 模块采用异步队列机制处理消息发送。投递任务入队后由 DeliveryRunner 后台执行，支持重试和失败持久化。投递队列使用文件锁实现并发安全，多个投递任务不会相互干扰。SMTP 发送添加 Reply-To 头以支持 Gmail 会话 threading，发送频率限制为最小 5 秒间隔，避免触发垃圾邮件过滤。
-
-### 并发控制
-
-Concurrency 模块通过 LaneManager 实现任务隔离。主 lane 配置 max_concurrency=1，确保 CLI 交互命令顺序执行，避免多个命令同时操作导致的输出混乱。后台 lane 用于定时任务、投递任务等并发场景，各自独立运行互不阻塞。
-
-### 心跳与主动行为 (s07)
-
-系统实现 Heartbeat 心跳机制，支持定时主动任务。心跳使用 Lane 互斥模式，用户输入始终优先于后台任务。当用户正在输入时，后台心跳任务会自动让步，不会打断用户的交互体验。
-
-心跳任务的前置条件包括：时间间隔检查、活跃时间窗口、运行状态检测。任务执行结果通过线程安全的 OutputQueue 异步投递到 REPL，避免阻塞。心跳返回 HEARTBEAT_OK 约定值时表示“无内容报告”，系统会抑制空输出。
-
----
-
-## 配置管理
-
-系统配置集中在 `config.yaml` 文件中，包括四个团队的渠道信息和 Cron 表达式。环境变量通过 `.env` 文件管理，存放 API 密钥、数据库凭证等敏感信息。`config.yaml` 中的团队配置支持动态扩展，新的团队只需在配置文件中添加条目即可，无需修改代码。
-
-**多 Bot 配置**：在 `bots` 列表中定义多个飞书机器人，每个机器人有独立的 app_id/app_secret 和 personality：
+`config.yaml` 中可以定义团队、Bot、定时任务与存储目录。下面是简化示例：
 
 ```yaml
+github:
+  top_n: 20
+
+chromadb:
+  persist_directory: "./workspace/.chromadb"
+
+teams:
+  - id: "tech"
+    name: "技术团队"
+    channels: ["email", "feishu"]
+    feishu_chat_id: "oc_xxx"
+    email: "your_email@example.com"
+
 bots:
   - id: "tech-bot"
     name: "技术团队Bot"
     feishu:
-      app_id: "cli_xxx"
-      app_secret: "xxx"
-      bot_open_id: "oc_xxx"
+      app_id: "cli_xxxxxxxxxxxxxxxx"
+      app_secret: "your_app_secret_here"
+      bot_open_id: "oc_xxxxxxxxxxxxxxxx"
     personality: "tech"
     agent: "qa"
+
+cron:
+  crawler_time: "0 9 * * *"
+  summarizer_time: "30 9 * * *"
 ```
 
----
-
-## 运行方式
-
-运行主程序前需要配置 `.env` 文件，填入 ANTHROPIC_API_KEY（必需）、SMTP/IMAP 相关配置（可选）、飞书应用凭证（可选）。执行以下命令启动系统：
+### 4. 启动系统
 
 ```bash
 python src/main.py
 ```
 
-CLI 交互模式下可使用 `/crawl` 手动触发爬取，`/summarize [team]` 生成指定团队总结，`/sessions` 查看历史会话。
+启动后你可以先执行 `/crawl`，再继续使用 `/summarize` 或直接提问进行验证。
+
+---
+
+## 架构概览
+
+系统以 Agent + Gateway + Tooling 组合实现：
+
+| 组件 | 作用 |
+|------|------|
+| `CrawlerAgent` | 抓取 Trending、补充详情和 README、写入 ChromaDB |
+| `SummarizerAgent` | 基于团队 Prompt 生成总结 |
+| `QAAgent` | 调用 RAG 工具回答问题，维护会话历史 |
+| `Gateway` | 负责消息路由、频道接入与 Agent 分发 |
+| `DeliveryRunner` | 异步发送邮件/飞书消息，支持重试 |
+| `SQLiteSessionStore` | 保存 QA 会话与上下文压缩结果 |
+| `RAGStore` | 管理 ChromaDB 中的 `latest` / `snapshot` 项目记录 |
+
+在实现上，系统沿用了 ReAct Agent 循环、工具调用、上下文压缩和 Circuit Breaker 机制，以便在长对话、外部依赖失败和多渠道接入的情况下保持稳定。
 
 ---
 
 ## 依赖环境
 
-项目基于 Python 3.12 开发，主要依赖包括 anthropic SDK（调用 LLM）、chromadb（向量数据库）、schedule（定时任务）、python-dotenv（环境变量加载）、apscheduler（Cron 定时器）。完整依赖列表见 `requirements.txt`。
+当前 `requirements.txt` 中的主要依赖包括：
+
+- `anthropic`
+- `chromadb`
+- `python-dotenv`
+- `pyyaml`
+- `httpx`
+- `apscheduler`
+- `beautifulsoup4`
+
+如果你只是本地验证 CLI + RAG，至少需要保证 LLM、ChromaDB 持久化目录和基础 Python 依赖正常可用。

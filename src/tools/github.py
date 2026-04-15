@@ -158,8 +158,8 @@ def tool_github_fetch_readme(owner: str, repo: str) -> str:
     if not readme:
         return f"未找到 {owner}/{repo} 的 README"
 
-    if len(readme) > 15000:
-        readme = readme[:15000] + "\n\n... [内容过长，已截断]"
+    if len(readme) > 8000:
+        readme = readme[:8000] + "\n\n... [内容过长，已截断]"
 
     return readme
 

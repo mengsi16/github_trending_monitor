@@ -32,15 +32,13 @@ class CrawlerAgent(BaseAgent):
         if not projects:
             return "爬取失败：未获取到 GitHub Trending 数据"
 
-        try:
-            store.reset_collection()
-        except Exception as e:
-            return f"爬取失败：Chroma 重建失败 - {e}"
-
-        crawl_date = datetime.now().strftime("%Y-%m-%d")
-        crawl_ts = datetime.now().isoformat(timespec="seconds")
+        now = datetime.now()
+        crawl_date = now.strftime("%Y-%m-%d")
+        crawl_ts = now.isoformat(timespec="seconds")
+        crawl_batch_id = now.isoformat(timespec="microseconds")
 
         stored = 0
+        status_counts = {"new": 0, "updated": 0, "unchanged": 0}
         errors = []
         write_errors = []
         for rank, project in enumerate(projects, 1):
@@ -71,7 +69,7 @@ class CrawlerAgent(BaseAgent):
                 readme = ""
 
             try:
-                store.add_project({
+                write_result = store.add_project({
                     "repo_id": full_name,
                     "repo_name": full_name,
                     "description": details.get("description") or project.get("description", ""),
@@ -84,16 +82,21 @@ class CrawlerAgent(BaseAgent):
                     "url": details.get("url") or project.get("url", f"https://github.com/{full_name}"),
                     "crawl_date": crawl_date,
                     "crawl_ts": crawl_ts,
+                    "crawl_batch_id": crawl_batch_id,
                     "readme": readme,
                 })
                 stored += 1
+                status = write_result.get("status", "updated")
+                if status in status_counts:
+                    status_counts[status] += 1
             except Exception as e:
                 write_errors.append(f"{full_name}: {e}")
 
         lines = [
             f"已完成 GitHub Trending 爬取（daily）。",
             f"请求数量: {top_n}，抓取到: {len(projects)}，入库: {stored}。",
-            f"Chroma 已删除并重建，当前记录数: {store.count()}。",
+            f"去重结果: 新增 {status_counts['new']}，内容更新 {status_counts['updated']}，内容未变 {status_counts['unchanged']}。",
+            f"Chroma 已保留历史记录，当前记录数: {store.count()}。",
             "",
             "Top 项目预览:",
         ]

@@ -1,6 +1,6 @@
 """总结 Agent (s02, s05)"""
 from .base import BaseAgent
-from ..tools import RAG_TOOLS, RAG_HANDLERS, EMAIL_TOOLS, EMAIL_HANDLERS, FEISHU_TOOLS, FEISHU_HANDLERS
+from ..tools import RAG_TOOLS, RAG_HANDLERS
 from src.config import config
 
 # 团队风格定义 - 作为系统提示词的一部分
@@ -97,8 +97,8 @@ class SummarizerAgent(BaseAgent):
 
     def __init__(self, name: str = "summarizer"):
         super().__init__(name, SUMMARIZER_PROMPT)
-        self.tools = RAG_TOOLS + EMAIL_TOOLS + FEISHU_TOOLS
-        self.handlers = {**RAG_HANDLERS, **EMAIL_HANDLERS, **FEISHU_HANDLERS}
+        self.tools = RAG_TOOLS
+        self.handlers = RAG_HANDLERS
 
     def _default_prompt(self) -> str:
         return SUMMARIZER_PROMPT

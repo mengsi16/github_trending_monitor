@@ -1,6 +1,11 @@
 """上下文压缩模块 (s03) - 三层压缩策略"""
 import os
+import time
+import random
+import logging
 from typing import List, Dict, Any, Optional
+
+_logger = logging.getLogger("compactor")
 from dataclasses import dataclass, field
 from anthropic import Anthropic
 
@@ -199,16 +204,31 @@ class ContextCompactor:
 - 使用 bullet point 格式
 """
 
-        try:
-            response = client.messages.create(
-                model=model,
-                max_tokens=1024,
-                system="你是一个对话摘要生成器。请简洁准确地提取关键信息。",
-                messages=[{"role": "user", "content": summary_prompt}]
-            )
-            return response.content[0].text if response.content else ""
-        except Exception as e:
-            return f"[摘要生成失败: {e}]"
+        max_retries = 3
+        base_delay = 2.0
+
+        for attempt in range(max_retries + 1):
+            try:
+                with client.messages.stream(
+                    model=model,
+                    max_tokens=1024,
+                    system="你是一个对话摘要生成器。请简洁准确地提取关键信息。",
+                    messages=[{"role": "user", "content": summary_prompt}]
+                ) as stream:
+                    response = stream.get_final_message()
+                return response.content[0].text if response.content else ""
+            except Exception as e:
+                err_str = str(e).lower()
+                is_retryable = any(kw in err_str for kw in [
+                    "overloaded", "rate_limit", "rate limit", "busy", "繁忙",
+                    "server_error", "server error", "service unavailable",
+                    "timeout", "timed out", "connection", "529", "502", "503", "500",
+                ])
+                if attempt >= max_retries or not is_retryable:
+                    return f"[摘要生成失败: {e}]"
+                delay = base_delay * (2 ** attempt) + random.uniform(0, 1)
+                _logger.warning(f"[Compactor] 摘要生成失败 (尝试 {attempt + 1}/{max_retries + 1}), {delay:.1f}s 后重试: {e}")
+                time.sleep(delay)
 
     def _serialize_for_summary(self, messages: List[Dict]) -> str:
         """将消息序列化为摘要提示"""

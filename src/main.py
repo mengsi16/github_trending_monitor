@@ -40,6 +40,7 @@ from src.channels.base import InboundMessage
 from src.scheduler import scheduler, setup_cron_jobs, Heartbeat
 from src.delivery import DeliveryRunner
 from src.concurrency import LaneManager
+logger = logging.getLogger("main")
 
 # 全局 Lane 锁 (s07) - 用户输入优先
 lane_lock = threading.Lock()
@@ -226,16 +227,87 @@ def init_heartbeat() -> Heartbeat:
     return heartbeat
 
 
-def run_crawler():
+def _truncate_text(text: str, limit: int = 4000) -> str:
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}\n\n... [内容已截断]"
+
+
+def _build_summary_payload(team_id: str = None):
+    summarizer = gateway.agent_factory.get("summarizer")
+    if not summarizer:
+        raise RuntimeError("Summarizer Agent 未初始化")
+
+    if team_id:
+        summary = summarizer.generate_summary(team_id)
+        return summary, {team_id: summary}
+
+    summaries = summarizer.generate_all_summaries()
+    if not summaries:
+        raise RuntimeError("未配置任何团队，无法生成总结")
+
+    failed = [
+        f"{next((t.name for t in config.teams if t.id == tid), tid)}: {summary}"
+        for tid, summary in summaries.items()
+        if isinstance(summary, str) and summary.startswith("生成失败:")
+    ]
+    if failed and len(failed) == len(summaries):
+        raise RuntimeError("；".join(failed))
+
+    parts = ["GitHub 热榜总结:\n"]
+    for tid, summary in summaries.items():
+        team = next((t for t in config.teams if t.id == tid), None)
+        team_name = team.name if team else tid
+        parts.append(f"=== {team_name} ===\n{summary}\n")
+
+    return "\n".join(parts).strip(), summaries
+
+
+def _enqueue_summary_deliveries(summaries: dict):
+    for tid, summary in summaries.items():
+        if not summary or (isinstance(summary, str) and summary.startswith("生成失败:")):
+            continue
+
+        team = next((t for t in config.teams if t.id == tid), None)
+        if not team:
+            continue
+
+        for channel in team.channels:
+            if channel == "email" and team.email:
+                delivery_runner.enqueue("email", team.email, summary, f"GitHub 热榜 - {team.name}")
+            if channel == "feishu" and team.feishu_chat_id:
+                delivery_runner.enqueue("feishu", team.feishu_chat_id, summary)
+
+
+def _run_crawl_pipeline(auto_summarize: bool = False) -> str:
+    crawler = gateway.agent_factory.get("crawler")
+    if not crawler:
+        raise RuntimeError("Crawler Agent 未初始化")
+
+    result = crawler.run_crawl()
+    if not auto_summarize:
+        return result
+
+    try:
+        summary_text, _ = _build_summary_payload()
+        return f"{result}\n\n自动总结:\n\n{summary_text}"
+    except Exception as e:
+        logger.exception("Automatic summarize after crawl failed")
+        return f"{result}\n\n自动总结失败: {e}"
+
+
+def run_crawler(auto_summarize: bool = False):
     """运行爬虫"""
     print("Running crawler...")
-    crawler = gateway.agent_factory.get("crawler")
-    if crawler:
-        try:
-            result = crawler.run_crawl()
-            print(f"Crawler result: {result[:200]}...")
-        except Exception as e:
-            print(f"Crawler error: {e}")
+    try:
+        result = _run_crawl_pipeline(auto_summarize=auto_summarize)
+        print(result)
+        return result
+    except Exception as e:
+        logger.exception("Crawler error")
+        print(f"Crawler error: {e}")
+        return f"Crawler error: {e}"
+
 
 def run_compact(keep_last: int = 1):
     """运行手动压缩"""
@@ -251,51 +323,19 @@ def run_compact(keep_last: int = 1):
         stats = qa.get_compact_stats()
         print(f"压缩统计: {stats}")
 
+
 def run_summarizer(team_id: str = None):
     """运行总结 - 可以指定团队或不指定（所有团队）"""
     print("Running summarizer...")
-    summarizer = gateway.agent_factory.get("summarizer")
-    if summarizer:
-        try:
-            if team_id:
-                # 为指定团队生成总结
-                team = next((t for t in config.teams if t.id == team_id), None)
-                team_name = team.name if team else team_id
-                print(f"\n{'='*50}")
-                print(f"团队: {team_name} (风格)")
-                print(f"{'='*50}")
-                summary = summarizer.generate_summary(team_id)
-                print(summary[:10000] if len(summary) > 10000 else summary)
-
-                # 入队投递
-                if team:
-                    for channel in team.channels:
-                        if channel == "email" and team.email:
-                            delivery_runner.enqueue("email", team.email, summary, f"GitHub 热榜 - {team.name}")
-                        if channel == "feishu" and team.feishu_chat_id:
-                            delivery_runner.enqueue("feishu", team.feishu_chat_id, summary)
-            else:
-                # 为所有团队生成总结
-                summaries = summarizer.generate_all_summaries()
-                # 打印到控制台
-                for tid, summary in summaries.items():
-                    team = next((t for t in config.teams if t.id == tid), None)
-                    team_name = team.name if team else tid
-                    print(f"\n{'='*50}")
-                    print(f"团队: {team_name}")
-                    print(f"{'='*50}")
-                    print(summary[:10000] if len(summary) > 10000 else summary)
-                    print()
-
-                    # 同时入队投递
-                    if team:
-                        for channel in team.channels:
-                            if channel == "email" and team.email:
-                                delivery_runner.enqueue("email", team.email, summary, f"GitHub 热榜 - {team.name}")
-                            if channel == "feishu" and team.feishu_chat_id:
-                                delivery_runner.enqueue("feishu", team.feishu_chat_id, summary)
-        except Exception as e:
-            print(f"Summarizer error: {e}")
+    try:
+        output, summaries = _build_summary_payload(team_id)
+        print(output[:10000] if len(output) > 10000 else output)
+        _enqueue_summary_deliveries(summaries)
+        return output
+    except Exception as e:
+        logger.exception("Summarizer error")
+        print(f"Summarizer error: {e}")
+        return f"Summarizer error: {e}"
 
 
 def run_list_sessions():
@@ -415,49 +455,32 @@ def handle_email_request(message: InboundMessage):
     # 1. summarize 命令 - 获取 GitHub 热榜总结
     if "summarize" in text_lower or "总结" in text_lower or "热榜" in text_lower:
         print("[Email] 执行 summarize 命令")
-        summarizer = gateway.agent_factory.get("summarizer")
-        if summarizer:
-            try:
-                # 尝试从主题或内容中提取团队
-                team_id = None
-                for team in config.teams:
-                    if team.id in text_lower or team.name in text_lower:
-                        team_id = team.id
-                        break
+        try:
+            team_id = None
+            for team in config.teams:
+                if team.id in text_lower or team.name in text_lower:
+                    team_id = team.id
+                    break
 
-                if team_id:
-                    response = summarizer.generate_summary(team_id)
-                else:
-                    # 生成所有团队的总结
-                    summaries = summarizer.generate_all_summaries()
-                    response = "GitHub 热榜总结:\n\n"
-                    for tid, summary in summaries.items():
-                        team = next((t for t in config.teams if t.id == tid), None)
-                        team_name = team.name if team else tid
-                        response += f"=== {team_name} ===\n{summary}\n\n"
-
-                response_subject = "GitHub 热榜总结"
-            except Exception as e:
-                response = f"生成总结失败: {str(e)}"
-        else:
-            response = "Summarizer Agent 未初始化"
+            response, _ = _build_summary_payload(team_id)
+            response_subject = "GitHub 热榜总结"
+        except Exception as e:
+            logger.exception("Email summarize failed")
+            response = f"生成总结失败: {str(e)}"
 
     # 2. crawl 命令 - 立即爬取
     elif "crawl" in text_lower or "爬取" in text_lower or "刷新" in text_lower:
         print("[Email] 执行 crawl 命令")
-        crawler = gateway.agent_factory.get("crawler")
-        if crawler:
-            try:
-                result = crawler.run_crawl()
-                response = f"爬取完成!\n\n{result[:2000]}" if len(result) > 2000 else f"爬取完成!\n\n{result}"
-                response_subject = "爬取结果"
-            except Exception as e:
-                response = f"爬取失败: {str(e)}"
-        else:
-            response = "Crawler Agent 未初始化"
+        try:
+            result = _run_crawl_pipeline(auto_summarize=True)
+            response = f"爬取完成!\n\n{_truncate_text(result)}"
+            response_subject = "爬取与总结结果"
+        except Exception as e:
+            logger.exception("Email crawl failed")
+            response = f"爬取失败: {str(e)}"
 
     # 3. help 命令 - 帮助信息
-    elif "help" in text_lower or "帮助" in text_lower or "?" in text:
+    elif "help" in text_lower or "帮助" in text or "?" in text:
         response = """GitHub Trending Monitor - 支持的命令:
 
 1. summarize / 总结 / 热榜
@@ -472,8 +495,7 @@ def handle_email_request(message: InboundMessage):
 
 4. help / 帮助
    - 显示此帮助信息
-
-支持的团队: """ + ", ".join([t.name for t in config.teams])
+"""
         response_subject = "帮助信息"
 
     # 4. ask 命令 - 向 QA 提问
@@ -486,6 +508,7 @@ def handle_email_request(message: InboundMessage):
                 response = qa.answer(question)
                 response_subject = "AI 回复"
             except Exception as e:
+                logger.exception("Email ask failed")
                 response = f"处理问题失败: {str(e)}"
         else:
             response = "QA Agent 未初始化"
@@ -499,6 +522,7 @@ def handle_email_request(message: InboundMessage):
                 response = qa.answer(text)
                 response_subject = "AI 回复"
             except Exception as e:
+                logger.exception("Email QA failed")
                 response = f"处理失败: {str(e)}"
         else:
             response = "QA Agent 未初始化，请联系管理员"
@@ -509,6 +533,7 @@ def handle_email_request(message: InboundMessage):
             email_channel.send(sender, response, subject=response_subject)
             print(f"[Email] 已回复 {sender}")
         except Exception as e:
+            logger.exception("Email send failed")
             print(f"[Email] 回复失败: {e}")
 
 
@@ -544,44 +569,29 @@ def handle_feishu_request(message: InboundMessage):
     # 1. summarize 命令
     if "summarize" in text_lower or "总结" in text_lower or "热榜" in text_lower:
         print("[Feishu] 执行 summarize 命令")
-        summarizer = gateway.agent_factory.get("summarizer")
-        if summarizer:
-            try:
-                team_id = None
-                for team in config.teams:
-                    if team.id in text_lower or team.name in text_lower:
-                        team_id = team.id
-                        break
+        try:
+            team_id = None
+            for team in config.teams:
+                if team.id in text_lower or team.name in text_lower:
+                    team_id = team.id
+                    break
 
-                if team_id:
-                    response = summarizer.generate_summary(team_id)
-                else:
-                    summaries = summarizer.generate_all_summaries()
-                    response = "GitHub 热榜总结:\n\n"
-                    for tid, summary in summaries.items():
-                        team = next((t for t in config.teams if t.id == tid), None)
-                        team_name = team.name if team else tid
-                        response += f"=== {team_name} ===\n{summary}\n\n"
-
-                response_subject = "GitHub 热榜总结"
-            except Exception as e:
-                response = f"生成总结失败: {str(e)}"
-        else:
-            response = "Summarizer Agent 未初始化"
+            response, _ = _build_summary_payload(team_id)
+            response_subject = "GitHub 热榜总结"
+        except Exception as e:
+            logger.exception("Feishu summarize failed")
+            response = f"生成总结失败: {str(e)}"
 
     # 2. crawl 命令
     elif "crawl" in text_lower or "爬取" in text_lower or "刷新" in text_lower:
         print("[Feishu] 执行 crawl 命令")
-        crawler = gateway.agent_factory.get("crawler")
-        if crawler:
-            try:
-                result = crawler.run_crawl()
-                response = f"爬取完成!\n\n{result[:2000]}" if len(result) > 2000 else f"爬取完成!\n\n{result}"
-                response_subject = "爬取结果"
-            except Exception as e:
-                response = f"爬取失败: {str(e)}"
-        else:
-            response = "Crawler Agent 未初始化"
+        try:
+            result = _run_crawl_pipeline(auto_summarize=True)
+            response = f"爬取完成!\n\n{_truncate_text(result)}"
+            response_subject = "爬取与总结结果"
+        except Exception as e:
+            logger.exception("Feishu crawl failed")
+            response = f"爬取失败: {str(e)}"
 
     # 3. help 命令
     elif "help" in text_lower or "帮助" in text_lower:
@@ -611,6 +621,7 @@ def handle_feishu_request(message: InboundMessage):
                 response = qa.answer(question)
                 response_subject = "AI 回复"
             except Exception as e:
+                logger.exception("Feishu ask failed")
                 response = f"处理问题失败: {str(e)}"
         else:
             response = "QA Agent 未初始化"
@@ -624,6 +635,7 @@ def handle_feishu_request(message: InboundMessage):
                 response = qa.answer(text)
                 response_subject = "AI 回复"
             except Exception as e:
+                logger.exception("Feishu QA failed")
                 response = f"处理失败: {str(e)}"
         else:
             response = "QA Agent 未初始化，请联系管理员"
@@ -637,6 +649,7 @@ def handle_feishu_request(message: InboundMessage):
             feishu_channel.send(target, response, bot_id=bot_id)
             print(f"[Feishu] 已回复到 {target} (bot_id={bot_id})")
         except Exception as e:
+            logger.exception("Feishu send failed")
             print(f"[Feishu] 回复失败: {e}")
 
 
@@ -662,6 +675,7 @@ def start_email_polling(interval: int = 30):
                 for msg in messages:
                     handle_email_request(msg)
             except Exception as e:
+                logger.exception("Email poll failed")
                 print(f"[Email] 轮询错误: {e}")
 
             time.sleep(interval)
@@ -687,6 +701,7 @@ def start_feishu_polling(interval: int = 5):
                 for msg in messages:
                     handle_feishu_request(msg)
             except Exception as e:
+                logger.exception("Feishu poll failed")
                 print(f"[Feishu] 轮询错误: {e}")
 
             time.sleep(interval)
@@ -792,7 +807,7 @@ def main():
             team_arg = parts[1].lower() if len(parts) > 1 else None
 
             if cmd == "/crawl":
-                run_crawler()
+                run_crawler(auto_summarize=True)
             elif cmd == "/summarize":
                 if team_arg and team_arg in valid_teams:
                     run_summarizer(team_arg)
@@ -945,15 +960,16 @@ def main():
                             print("发送失败")
 
                     elif content_cmd == "crawl":
-                        crawler = gateway.agent_factory.get("crawler")
-                        if not crawler:
-                            print("Crawler 未初始化")
+                        try:
+                            result = _run_crawl_pipeline(auto_summarize=True)
+                        except Exception as e:
+                            logger.exception("Send crawl failed")
+                            print(f"爬取失败: {e}")
                             continue
 
-                        result = crawler.run_crawl()
-                        success = send_to_target(target, result)
+                        success = send_to_target(target, _truncate_text(result))
                         if success:
-                            print(f"已发送爬取结果到 {target}")
+                            print(f"已发送爬取与总结结果到 {target}")
                         else:
                             print("发送失败")
 

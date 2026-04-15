@@ -1,6 +1,10 @@
 """Agent 间通信工具 - 让 QA Agent 可以请求其他 Agent"""
 from typing import Optional
-from src.agents.registry import registry
+
+
+def _get_registry():
+    from src.agents.registry import registry
+    return registry
 
 
 def tool_request_crawl(top_n: Optional[int] = None) -> str:
@@ -19,6 +23,7 @@ def tool_request_crawl(top_n: Optional[int] = None) -> str:
         payload["top_n"] = top_n
 
     # 通过 registry 调用 crawler
+    registry = _get_registry()
     response = registry.call(
         from_agent="qa",
         to_agent="crawler",
@@ -40,6 +45,7 @@ def tool_get_agent_status() -> str:
     """
     获取当前已注册的 Agent 状态
     """
+    registry = _get_registry()
     agents = registry.list_agents()
     if not agents:
         return "暂无注册的 Agent"

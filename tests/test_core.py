@@ -498,5 +498,147 @@ class TestSerializeContentBlock:
         assert result == "Hello World"
 
 
+class TestRAGStore:
+    """测试 RAGStore 最新批次读取"""
+
+    def test_get_latest_returns_only_latest_batch_sorted_by_rank(self):
+        from src.tools.chromadb import RAGStore
+
+        class FakeCollection:
+            def get(self, where=None):
+                return {
+                    "metadatas": [
+                        {
+                            "repo_id": "old/repo",
+                            "repo_name": "old/repo",
+                            "crawl_date": "2026-04-14",
+                            "crawl_ts": "2026-04-14T09:00:00",
+                            "crawl_batch_id": "2026-04-14T09:00:00.000001",
+                            "stars": 10,
+                            "today_stars": 1,
+                            "since": "daily",
+                            "rank": 1,
+                            "url": "https://github.com/old/repo",
+                        },
+                        {
+                            "repo_id": "latest/repo-b",
+                            "repo_name": "latest/repo-b",
+                            "crawl_date": "2026-04-15",
+                            "crawl_ts": "2026-04-15T09:00:00",
+                            "crawl_batch_id": "2026-04-15T09:00:00.000002",
+                            "stars": 30,
+                            "today_stars": 3,
+                            "since": "daily",
+                            "rank": 2,
+                            "url": "https://github.com/latest/repo-b",
+                        },
+                        {
+                            "repo_id": "latest/repo-a",
+                            "repo_name": "latest/repo-a",
+                            "crawl_date": "2026-04-15",
+                            "crawl_ts": "2026-04-15T09:00:00",
+                            "crawl_batch_id": "2026-04-15T09:00:00.000002",
+                            "stars": 40,
+                            "today_stars": 4,
+                            "since": "daily",
+                            "rank": 1,
+                            "url": "https://github.com/latest/repo-a",
+                        },
+                    ],
+                    "documents": [
+                        "old doc",
+                        "latest b doc",
+                        "latest a doc",
+                    ],
+                }
+
+        store = RAGStore.__new__(RAGStore)
+        store.collection = FakeCollection()
+
+        results = store.get_latest(limit=10)
+
+        assert [item["repo_name"] for item in results] == ["latest/repo-a", "latest/repo-b"]
+        assert all(item["crawl_batch_id"] == "2026-04-15T09:00:00.000002" for item in results)
+
+    def test_add_project_deduplicates_latest_and_snapshots_only_on_content_change(self):
+        from src.tools.chromadb import RAGStore
+
+        class FakeCollection:
+            def __init__(self):
+                self.records = {}
+
+            def get(self, ids=None, where=None):
+                if ids is not None:
+                    matched = [self.records[i] for i in ids if i in self.records]
+                    return {
+                        "ids": [item["id"] for item in matched],
+                        "documents": [item["document"] for item in matched],
+                        "metadatas": [item["metadata"] for item in matched],
+                    }
+
+                matched = []
+                for record in self.records.values():
+                    metadata = record["metadata"]
+                    if where and any(metadata.get(k) != v for k, v in where.items()):
+                        continue
+                    matched.append(record)
+
+                return {
+                    "ids": [item["id"] for item in matched],
+                    "documents": [item["document"] for item in matched],
+                    "metadatas": [item["metadata"] for item in matched],
+                }
+
+            def upsert(self, documents, ids, metadatas):
+                for doc, doc_id, meta in zip(documents, ids, metadatas):
+                    self.records[doc_id] = {"id": doc_id, "document": doc, "metadata": meta}
+
+            def add(self, documents, ids, metadatas):
+                for doc, doc_id, meta in zip(documents, ids, metadatas):
+                    if doc_id in self.records:
+                        raise ValueError("duplicate id")
+                    self.records[doc_id] = {"id": doc_id, "document": doc, "metadata": meta}
+
+            def count(self):
+                return len(self.records)
+
+        base_project = {
+            "repo_id": "owner/repo",
+            "repo_name": "owner/repo",
+            "description": "desc v1",
+            "language": "Python",
+            "stars": 100,
+            "today_stars": 10,
+            "since": "daily",
+            "rank": 1,
+            "topics": ["ai"],
+            "url": "https://github.com/owner/repo",
+            "crawl_date": "2026-04-15",
+            "crawl_ts": "2026-04-15T10:00:00",
+            "crawl_batch_id": "batch-1",
+            "readme": "hello world",
+        }
+
+        store = RAGStore.__new__(RAGStore)
+        store.collection = FakeCollection()
+
+        first = store.add_project(dict(base_project))
+        second = store.add_project(dict(base_project, stars=101, today_stars=11, rank=2, crawl_batch_id="batch-2"))
+        third = store.add_project(dict(base_project, description="desc v2", crawl_batch_id="batch-3"))
+
+        assert first["status"] == "new"
+        assert first["snapshot_added"] is True
+        assert second["status"] == "unchanged"
+        assert second["snapshot_added"] is False
+        assert third["status"] == "updated"
+        assert third["snapshot_added"] is True
+
+        latest_record = store.collection.records["latest::owner/repo"]
+        assert latest_record["metadata"]["record_type"] == "latest"
+        assert latest_record["metadata"]["crawl_batch_id"] == "batch-3"
+        snapshot_ids = [record_id for record_id in store.collection.records if record_id.startswith("snapshot::owner/repo::")]
+        assert len(snapshot_ids) == 2
+
+
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
