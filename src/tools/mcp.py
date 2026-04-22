@@ -93,14 +93,33 @@ class MCPClient:
 
     # ── 进程管理 ──────────────────────────────────────────────────────────────
 
+    @staticmethod
+    def _resolve_command(command: str) -> str:
+        """在 Windows 上将 npx/npm/node 等解析为完整可执行路径。
+        Windows 的 Popen 无法直接执行 .CMD 文件，需要传入完整路径。
+        """
+        if os.name != "nt":
+            return command
+        import shutil
+        # 先尝试原始名称（可能已带扩展名或是绝对路径）
+        resolved = shutil.which(command)
+        if resolved:
+            return resolved
+        # 再尝试加 .cmd 后缀（Windows Node.js 工具链惯例）
+        resolved = shutil.which(command + ".cmd")
+        if resolved:
+            return resolved
+        return command
+
     def start(self) -> bool:
         """启动 MCP 服务器子进程，返回是否成功"""
         if self._started:
             return True
         try:
             merged_env = {**os.environ, **self.env}
+            resolved_cmd = self._resolve_command(self.command)
             self._proc = subprocess.Popen(
-                [self.command] + self.args,
+                [resolved_cmd] + self.args,
                 stdin=subprocess.PIPE,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
