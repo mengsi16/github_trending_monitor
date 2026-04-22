@@ -1,0 +1,27 @@
+{
+  "mcpServers": {
+    "playwright": {
+      "command": "npx",
+      "args": ["@playwright/mcp@latest"],
+      "env": {},
+      "timeout": 60
+    },
+    "filesystem": {
+      "command": "npx",
+      "args": [
+        "@modelcontextprotocol/server-filesystem",
+        "/path/to/allowed/directory"
+      ],
+      "env": {},
+      "timeout": 30
+    },
+    "custom-python-server": {
+      "command": "python",
+      "args": ["/path/to/my_mcp_server.py"],
+      "env": {
+        "MY_API_KEY": "your-key-here"
+      },
+      "timeout": 30
+    }
+  }
+}

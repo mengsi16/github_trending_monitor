@@ -190,14 +190,14 @@ def init_channels():
 
         if getattr(email_channel, "smtp_enabled", False):
             delivery_runner.register_sender("email", email_channel.send)
-            print("[Email] SMTP sender enabled")
+            logger.info("[Email] SMTP sender enabled")
         else:
-            print("[Email] SMTP not fully configured, sender disabled")
+            logger.info("[Email] SMTP not fully configured, sender disabled")
 
         if getattr(email_channel, "imap_enabled", False):
-            print("[Email] IMAP polling enabled")
+            logger.info("[Email] IMAP polling enabled")
         else:
-            print("[Email] IMAP not fully configured, polling disabled")
+            logger.info("[Email] IMAP not fully configured, polling disabled")
 
     return cli
 
@@ -429,7 +429,7 @@ def handle_email_request(message: InboundMessage):
     sender = message.sender_id
     subject = message.account_id  # 主题存储在 account_id
 
-    print(f"[Email] 收到来自 {sender} 的邮件: {subject}")
+    logger.info("[Email] 收到来自 %s 的邮件: %s", sender, subject)
 
     # 安全过滤：只处理包含命令关键词的邮件，避免回复垃圾邮件
     text_lower = text.lower()
@@ -443,10 +443,10 @@ def handle_email_request(message: InboundMessage):
     is_command = is_command or any(kw in subject_lower for kw in command_keywords)
 
     if not is_command:
-        print(f"[Email] 忽略非命令邮件 (来自 {sender})")
+        logger.debug("[Email] 忽略非命令邮件 (来自 %s)", sender)
         return
 
-    print(f"[Email] 内容: {text[:100]}...")
+    logger.debug("[Email] 内容: %s...", text[:100])
 
     # 解析命令
     response = None
@@ -454,7 +454,7 @@ def handle_email_request(message: InboundMessage):
 
     # 1. summarize 命令 - 获取 GitHub 热榜总结
     if "summarize" in text_lower or "总结" in text_lower or "热榜" in text_lower:
-        print("[Email] 执行 summarize 命令")
+        logger.info("[Email] 执行 summarize 命令")
         try:
             team_id = None
             for team in config.teams:
@@ -470,7 +470,7 @@ def handle_email_request(message: InboundMessage):
 
     # 2. crawl 命令 - 立即爬取
     elif "crawl" in text_lower or "爬取" in text_lower or "刷新" in text_lower:
-        print("[Email] 执行 crawl 命令")
+        logger.info("[Email] 执行 crawl 命令")
         try:
             result = _run_crawl_pipeline(auto_summarize=True)
             response = f"爬取完成!\n\n{_truncate_text(result)}"
@@ -500,7 +500,7 @@ def handle_email_request(message: InboundMessage):
 
     # 4. ask 命令 - 向 QA 提问
     elif text_lower.startswith("ask ") or text_lower.startswith("问 "):
-        print("[Email] 执行 ask 命令")
+        logger.info("[Email] 执行 ask 命令")
         qa = gateway.agent_factory.get("qa")
         if qa:
             try:
@@ -515,7 +515,7 @@ def handle_email_request(message: InboundMessage):
 
     # 5. 默认 - 发送到 QA 处理
     else:
-        print("[Email] 路由到 QA Agent")
+        logger.info("[Email] 路由到 QA Agent")
         qa = gateway.agent_factory.get("qa")
         if qa:
             try:
@@ -531,10 +531,9 @@ def handle_email_request(message: InboundMessage):
     if response and email_channel:
         try:
             email_channel.send(sender, response, subject=response_subject)
-            print(f"[Email] 已回复 {sender}")
+            logger.info("[Email] 已回复 %s", sender)
         except Exception as e:
-            logger.exception("Email send failed")
-            print(f"[Email] 回复失败: {e}")
+            logger.exception("[Email] 回复失败: %s", e)
 
 
 def handle_feishu_request(message: InboundMessage):
@@ -658,15 +657,15 @@ def start_email_polling(interval: int = 30):
     global email_channel, running
 
     if not email_channel:
-        print("[Email] 邮件通道未初始化，跳过轮询")
+        logger.debug("[Email] 邮件通道未初始化，跳过轮询")
         return
 
     # 检查 IMAP 是否可用
     if not getattr(email_channel, "imap_enabled", False):
-        print("[Email] IMAP 未完整配置，跳过邮件接收")
+        logger.debug("[Email] IMAP 未完整配置，跳过邮件接收")
         return
 
-    print(f"[Email] 启动邮件轮询 (间隔 {interval} 秒)")
+    logger.info("[Email] 启动邮件轮询 (间隔 %s 秒)", interval)
 
     def poll():
         while running:
@@ -675,8 +674,7 @@ def start_email_polling(interval: int = 30):
                 for msg in messages:
                     handle_email_request(msg)
             except Exception as e:
-                logger.exception("Email poll failed")
-                print(f"[Email] 轮询错误: {e}")
+                logger.exception("[Email] 轮询错误: %s", e)
 
             time.sleep(interval)
 

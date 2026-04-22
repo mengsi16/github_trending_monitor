@@ -3,6 +3,9 @@
 config.yaml
 workspace/
 
+# MCP server config (may contain API keys / local paths)
+mcp_servers.json
+
 # Python
 __pycache__/
 *.py[cod]

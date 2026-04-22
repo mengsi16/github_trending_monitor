@@ -160,7 +160,25 @@ pip install -r requirements.txt
 - **邮件**：SMTP / IMAP 相关配置（如需邮件收发）
 - **飞书**：App 凭证与 Webhook 配置（如需飞书机器人）
 
-### 3. 配置团队与 Bot
+### 3. 配置 MCP 工具（可选）
+
+系统支持通过 [MCP（Model Context Protocol）](https://modelcontextprotocol.io) 加载外部工具，例如 Playwright 浏览器自动化。
+
+复制示例配置并按需修改：
+
+```bash
+cp mcp_servers_example.json mcp_servers.json
+```
+
+内置示例为 Playwright MCP，启用后 QA Agent 可直接控制浏览器。需先安装依赖：
+
+```bash
+npm install -g @playwright/mcp
+```
+
+`mcp_servers.json` 中的服务器在系统启动时自动连接，工具动态注册到 QA Agent 的工具调用链中。若不需要任何 MCP 工具，跳过此步即可，系统正常运行不受影响。
+
+### 4. 配置团队与 Bot
 
 `config.yaml` 中可以定义团队、Bot、定时任务与存储目录。下面是简化示例：
 
@@ -193,7 +211,7 @@ cron:
   summarizer_time: "30 9 * * *"
 ```
 
-### 4. 启动系统
+### 5. 启动系统
 
 ```bash
 python src/main.py
@@ -216,6 +234,7 @@ python src/main.py
 | `DeliveryRunner` | 异步发送邮件/飞书消息，支持重试 |
 | `SQLiteSessionStore` | 保存 QA 会话与上下文压缩结果 |
 | `RAGStore` | 管理 ChromaDB 中的 `latest` / `snapshot` 项目记录 |
+| `MCPLoader` | 在启动时连接 MCP 服务器，将其工具动态注入 Agent 工具链 |
 
 在实现上，系统沿用了 ReAct Agent 循环、工具调用、上下文压缩和 Circuit Breaker 机制，以便在长对话、外部依赖失败和多渠道接入的情况下保持稳定。
 
@@ -232,5 +251,10 @@ python src/main.py
 - `httpx`
 - `apscheduler`
 - `beautifulsoup4`
+
+MCP 工具（可选，需要 Node.js 环境）：
+
+- `@playwright/mcp`：浏览器自动化（`npm install -g @playwright/mcp`）
+- `@modelcontextprotocol/server-filesystem`：本地文件系统访问
 
 如果你只是本地验证 CLI + RAG，至少需要保证 LLM、ChromaDB 持久化目录和基础 Python 依赖正常可用。

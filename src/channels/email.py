@@ -81,7 +81,7 @@ class EmailChannel(Channel):
             self._handle_imap_connection_error(e)
             return None
         except Exception as e:
-            print(f"IMAP receive error: {e}")
+            _logger.error("IMAP receive error: %s", e)
             return None
 
     def receive_all(self) -> List[InboundMessage]:
@@ -108,7 +108,7 @@ class EmailChannel(Channel):
             self._handle_imap_connection_error(e)
             return []
         except Exception as e:
-            print(f"IMAP receive all error: {e}")
+            _logger.error("IMAP receive all error: %s", e)
             return []
 
     def _imap_ready(self) -> bool:
@@ -296,7 +296,7 @@ class EmailChannel(Channel):
 
     def send(self, to: str, text: str, **kwargs) -> bool:
         if not self.smtp_enabled:
-            print("Email send skipped: SMTP is not fully configured")
+            _logger.debug("Email send skipped: SMTP is not fully configured")
             return False
 
         if not self._smtp_ready():
@@ -308,7 +308,7 @@ class EmailChannel(Channel):
 
         # 避免发送太频繁
         if current_time - self._last_send_time < self._min_send_interval:
-            print(f"Email send skipped: too frequent (interval < {self._min_send_interval}s)")
+            _logger.debug("Email send skipped: too frequent (interval < %ss)", self._min_send_interval)
             return False
 
         try:
@@ -339,16 +339,16 @@ class EmailChannel(Channel):
 
             self._reset_smtp_backoff()
             self._last_send_time = current_time
-            print(f"Email sent successfully to {to}")
+            _logger.info("Email sent successfully to %s", to)
             return True
         except smtplib.SMTPAuthenticationError as e:
-            print(f"Email auth failed: {e}")
+            _logger.error("Email auth failed: %s", e)
             # 鉴权失败通常是配置问题，避免短时间内重复尝试
             self._smtp_error_count += 1
             self._smtp_next_retry_at = time.time() + min(300, self.smtp_backoff_max)
             return False
         except smtplib.SMTPRecipientsRefused as e:
-            print(f"Email recipient refused: {e}")
+            _logger.error("Email recipient refused: %s", e)
             return False
         except (smtplib.SMTPServerDisconnected, socket.timeout, TimeoutError, OSError, ssl.SSLError) as e:
             self._handle_smtp_connection_error(e)

@@ -1,8 +1,11 @@
 """邮件发送工具 (s04, s08)"""
 import smtplib
 import os
+import logging
 from email.mime.text import MIMEText
 from email.mime.multipart import MIMEMultipart
+
+_logger = logging.getLogger("email_tool")
 
 class EmailSender:
     def __init__(self):
@@ -15,7 +18,7 @@ class EmailSender:
     def send(self, to: str, subject: str, body: str) -> bool:
         """发送邮件"""
         if not self.host or not self.user:
-            print("SMTP not configured, skipping email")
+            _logger.debug("SMTP not configured, skipping email")
             return False
 
         try:
@@ -33,7 +36,7 @@ class EmailSender:
 
             return True
         except Exception as e:
-            print(f"Email send failed: {e}")
+            _logger.error("Email send failed: %s", e)
             return False
 
     def send_to_team(self, team_id: str, subject: str, body: str) -> bool:
