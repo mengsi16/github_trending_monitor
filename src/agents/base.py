@@ -204,7 +204,7 @@ class BaseAgent(ABC):
         _logger.debug(f"压缩后 messages 数量: {len(messages)}")
 
         iteration = 0
-        max_iterations = 10
+        max_iterations = 50
 
         while iteration < max_iterations:
             iteration += 1
@@ -235,12 +235,14 @@ class BaseAgent(ABC):
 
             elif response.stop_reason == "tool_use":
                 tool_results = []
+                called_tools = []
                 for block in response.content:
                     if block.type != "tool_use":
                         continue
 
                     tool_name = block.name
                     tool_input = block.input
+                    called_tools.append(tool_name)
 
                     if tool_handlers and tool_name in tool_handlers:
                         try:
@@ -256,17 +258,62 @@ class BaseAgent(ABC):
                         "content": result,
                     })
 
+                _logger.info(
+                    f"[{self.name}] iteration={iteration}, "
+                    f"tools={called_tools}"
+                )
+
                 messages.append({"role": "user", "content": tool_results})
 
                 # 在工具调用后再次应用压缩
                 messages = self._apply_compaction(messages)
+
+                # 迭代干预：接近上限时注入收尾指令，阻止模型继续循环
+                wrap_up_threshold = max(3, int(max_iterations * 0.7))
+                if iteration >= wrap_up_threshold:
+                    remaining = max_iterations - iteration
+                    _logger.warning(
+                        f"[{self.name}] iteration={iteration} >= {wrap_up_threshold}, "
+                        f"injecting wrap-up (remaining={remaining})"
+                    )
+                    messages.append({
+                        "role": "user",
+                        "content": (
+                            f"[系统提示] 你已经调用了 {iteration} 次工具，"
+                            f"还剩 {remaining} 次机会。请立即根据已获取的信息给出最终回答，"
+                            f"不要再调用任何工具。如果信息不足，直接说明缺少什么。"
+                        ),
+                    })
 
             else:
                 # 其他 stop_reason，使用辅助函数提取文本
                 text = extract_text_from_content(response.content)
                 return text, messages
 
-        raise RuntimeError(f"Agent loop exceeded {max_iterations} iterations")
+        # 超过迭代上限：优雅降级，提取已有文本或返回提示
+        _logger.warning(
+            f"[{self.name}] Agent loop exceeded {max_iterations} iterations, "
+            f"gracefully degrading"
+        )
+        # 尝试从最后一条 assistant 消息中提取文本
+        last_text = ""
+        for msg in reversed(messages):
+            if msg.get("role") == "assistant":
+                content = msg.get("content", [])
+                if isinstance(content, list):
+                    for block in content:
+                        if isinstance(block, dict) and block.get("text"):
+                            last_text = block["text"]
+                            break
+                elif isinstance(content, str):
+                    last_text = content
+                    break
+                if last_text:
+                    break
+
+        if last_text:
+            return last_text, messages
+        return f"抱歉，处理过程中工具调用次数过多（{max_iterations}次），请尝试简化问题或稍后重试。", messages
 
     def get_circuit_breaker_status(self) -> dict:
         """获取 Circuit Breaker 状态"""

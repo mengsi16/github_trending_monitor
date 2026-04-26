@@ -556,7 +556,33 @@ class FeishuChannel(Channel):
 
                     await ws_client_module._select()
 
-                loop.run_until_complete(bootstrap_all())
+                # 自动重连：当 _select() 因连接断开退出时，指数退避重试
+                max_retries = 100  # 几乎无限重试
+                base_delay = 2.0
+                for attempt in range(max_retries):
+                    try:
+                        loop.run_until_complete(bootstrap_all())
+                    except Exception as e:
+                        _logger.error(f"RPC 长连接线程异常: {e}")
+
+                    # 如果 RPC 线程被外部停止，退出循环
+                    if not self._rpc_thread or not self._rpc_thread.is_alive():
+                        break
+
+                    delay = min(base_delay * (2 ** min(attempt, 6)), 300)  # 最大 5 分钟
+                    _logger.warning(
+                        f"RPC 长连接断开，{delay:.0f}s 后重连 (attempt={attempt + 1})"
+                    )
+                    import time
+                    time.sleep(delay)
+
+                    # 重建事件循环（旧的已关闭）
+                    if loop.is_closed():
+                        loop = asyncio.new_event_loop()
+                        self._rpc_loop = loop
+                        asyncio.set_event_loop(loop)
+                        ws_client_module.loop = loop
+
             except Exception as e:
                 _logger.error(f"RPC 长连接线程异常退出: {e}")
             finally:

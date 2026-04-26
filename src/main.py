@@ -418,6 +418,68 @@ def run_new_session():
     return session_id
 
 
+def _normalize_command_text(text: str) -> str:
+    """压缩空白，便于做精确命令匹配。"""
+    return " ".join((text or "").strip().split())
+
+
+def _parse_inbound_command(text: str) -> tuple[str, str]:
+    """解析邮箱/飞书文本命令，返回 (command, arg)。"""
+    normalized = _normalize_command_text(text)
+    if not normalized:
+        return "chat", ""
+
+    lower = normalized.lower()
+
+    # help 仅接受精确匹配；"help me" 将走对话分支。
+    if lower == "help" or normalized == "帮助":
+        return "help", ""
+
+    if lower == "crawl" or normalized in {"爬取", "刷新"}:
+        return "crawl", ""
+
+    if lower == "summarize":
+        return "summarize", ""
+    if lower.startswith("summarize "):
+        return "summarize", normalized[len("summarize "):].strip()
+
+    if normalized == "总结":
+        return "summarize", ""
+    if normalized.startswith("总结 "):
+        return "summarize", normalized[len("总结 "):].strip()
+
+    if normalized == "热榜":
+        return "summarize", ""
+    if normalized.startswith("热榜 "):
+        return "summarize", normalized[len("热榜 "):].strip()
+
+    if lower.startswith("ask "):
+        return "ask", normalized[len("ask "):].strip()
+    if lower == "ask":
+        return "ask", ""
+    if normalized.startswith("问 "):
+        return "ask", normalized[len("问 "):].strip()
+    if normalized == "问":
+        return "ask", ""
+
+    return "chat", normalized
+
+
+def _resolve_qa_agent(message: InboundMessage):
+    """优先按路由取可回答 Agent，失败时回退默认 QA。"""
+    # 邮件 channel 的 account_id 承载的是主题，避免误触发 Feishu 的 account_id 绑定。
+    if message.channel != "feishu":
+        return gateway.agent_factory.get("qa")
+
+    agent, err = gateway.route(message)
+    if agent and hasattr(agent, "answer"):
+        return agent
+
+    if err:
+        logger.warning("Route fallback to QA (%s): %s", message.channel, err)
+    return gateway.agent_factory.get("qa")
+
+
 def handle_email_request(message: InboundMessage):
     """处理邮件请求并回复"""
     global email_channel
@@ -425,40 +487,39 @@ def handle_email_request(message: InboundMessage):
     if not email_channel:
         return
 
-    text = message.text.strip()
+    text = (message.text or "").strip()
     sender = message.sender_id
-    subject = message.account_id  # 主题存储在 account_id
+    subject = (message.account_id or "").strip()  # 主题存储在 account_id
 
     logger.info("[Email] 收到来自 %s 的邮件: %s", sender, subject)
 
-    # 安全过滤：只处理包含命令关键词的邮件，避免回复垃圾邮件
-    text_lower = text.lower()
-    command_keywords = ["summarize", "总结", "热榜", "crawl", "爬取", "刷新", "help", "帮助", "ask", "问"]
-
-    # 检查是否是命令邮件
-    is_command = any(kw in text_lower for kw in command_keywords)
-
-    # 也检查主题是否包含命令
-    subject_lower = subject.lower() if subject else ""
-    is_command = is_command or any(kw in subject_lower for kw in command_keywords)
-
-    if not is_command:
-        logger.debug("[Email] 忽略非命令邮件 (来自 %s)", sender)
+    if not text and not subject:
+        logger.debug("[Email] 忽略空邮件 (来自 %s)", sender)
         return
 
-    logger.debug("[Email] 内容: %s...", text[:100])
+    # 正文优先；若正文不是命令，再尝试主题（兼容常见邮件客户端签名正文）。
+    text_command, text_arg = _parse_inbound_command(text)
+    subject_command, subject_arg = _parse_inbound_command(subject)
+    if text_command != "chat":
+        command, command_arg = text_command, text_arg
+    elif subject_command != "chat":
+        command, command_arg = subject_command, subject_arg
+    else:
+        command = "chat"
+        command_arg = _normalize_command_text(text if text else subject)
 
-    # 解析命令
+    command_arg_lower = command_arg.lower()
+
     response = None
     response_subject = "回复"
 
-    # 1. summarize 命令 - 获取 GitHub 热榜总结
-    if "summarize" in text_lower or "总结" in text_lower or "热榜" in text_lower:
+    # 1. summarize 命令
+    if command == "summarize":
         logger.info("[Email] 执行 summarize 命令")
         try:
             team_id = None
             for team in config.teams:
-                if team.id in text_lower or team.name in text_lower:
+                if team.id in command_arg_lower or team.name in command_arg:
                     team_id = team.id
                     break
 
@@ -468,8 +529,8 @@ def handle_email_request(message: InboundMessage):
             logger.exception("Email summarize failed")
             response = f"生成总结失败: {str(e)}"
 
-    # 2. crawl 命令 - 立即爬取
-    elif "crawl" in text_lower or "爬取" in text_lower or "刷新" in text_lower:
+    # 2. crawl 命令
+    elif command == "crawl":
         logger.info("[Email] 执行 crawl 命令")
         try:
             result = _run_crawl_pipeline(auto_summarize=True)
@@ -479,8 +540,8 @@ def handle_email_request(message: InboundMessage):
             logger.exception("Email crawl failed")
             response = f"爬取失败: {str(e)}"
 
-    # 3. help 命令 - 帮助信息
-    elif "help" in text_lower or "帮助" in text or "?" in text:
+    # 3. help 命令（精确匹配）
+    elif command == "help":
         response = """GitHub Trending Monitor - 支持的命令:
 
 1. summarize / 总结 / 热榜
@@ -495,31 +556,39 @@ def handle_email_request(message: InboundMessage):
 
 4. help / 帮助
    - 显示此帮助信息
+
+5. 其他任意文本
+   - 默认进入 AI 对话
 """
         response_subject = "帮助信息"
 
-    # 4. ask 命令 - 向 QA 提问
-    elif text_lower.startswith("ask ") or text_lower.startswith("问 "):
+    # 4. ask 命令
+    elif command == "ask":
         logger.info("[Email] 执行 ask 命令")
-        qa = gateway.agent_factory.get("qa")
-        if qa:
-            try:
-                question = text[4:] if text_lower.startswith("ask ") else text[2:]
-                response = qa.answer(question)
-                response_subject = "AI 回复"
-            except Exception as e:
-                logger.exception("Email ask failed")
-                response = f"处理问题失败: {str(e)}"
+        question = command_arg.strip()
+        if not question:
+            response = "请在 ask 后输入问题，例如: ask 今天有哪些值得关注的项目？"
+            response_subject = "AI 回复"
         else:
-            response = "QA Agent 未初始化"
+            qa = _resolve_qa_agent(message)
+            if qa:
+                try:
+                    response = qa.answer(question)
+                    response_subject = "AI 回复"
+                except Exception as e:
+                    logger.exception("Email ask failed")
+                    response = f"处理问题失败: {str(e)}"
+            else:
+                response = "QA Agent 未初始化"
 
     # 5. 默认 - 发送到 QA 处理
     else:
-        logger.info("[Email] 路由到 QA Agent")
-        qa = gateway.agent_factory.get("qa")
+        logger.info("[Email] 路由到 QA Agent (chat)")
+        qa = _resolve_qa_agent(message)
+        question = text if text else subject
         if qa:
             try:
-                response = qa.answer(text)
+                response = qa.answer(question)
                 response_subject = "AI 回复"
             except Exception as e:
                 logger.exception("Email QA failed")
@@ -543,7 +612,7 @@ def handle_feishu_request(message: InboundMessage):
     if not feishu_channel:
         return
 
-    text = message.text.strip()
+    text = (message.text or "").strip()
     sender = message.sender_id
     peer_id = message.peer_id
     is_group = message.is_group
@@ -551,27 +620,23 @@ def handle_feishu_request(message: InboundMessage):
 
     print(f"[Feishu] 收到来自 {sender} 的消息: {text[:50]}...")
 
-    # 安全过滤：只处理包含命令关键词的飞书消息
-    text_lower = text.lower()
-    command_keywords = ["summarize", "总结", "热榜", "crawl", "爬取", "刷新", "help", "帮助", "ask", "问"]
-
-    is_command = any(kw in text_lower for kw in command_keywords)
-
-    if not is_command:
-        print(f"[Feishu] 忽略非命令消息")
+    if not text:
+        print("[Feishu] 忽略空消息")
         return
 
-    # 解析命令
+    command, command_arg = _parse_inbound_command(text)
+    command_arg_lower = command_arg.lower()
+
     response = None
     response_subject = "回复"
 
     # 1. summarize 命令
-    if "summarize" in text_lower or "总结" in text_lower or "热榜" in text_lower:
+    if command == "summarize":
         print("[Feishu] 执行 summarize 命令")
         try:
             team_id = None
             for team in config.teams:
-                if team.id in text_lower or team.name in text_lower:
+                if team.id in command_arg_lower or team.name in command_arg:
                     team_id = team.id
                     break
 
@@ -582,7 +647,7 @@ def handle_feishu_request(message: InboundMessage):
             response = f"生成总结失败: {str(e)}"
 
     # 2. crawl 命令
-    elif "crawl" in text_lower or "爬取" in text_lower or "刷新" in text_lower:
+    elif command == "crawl":
         print("[Feishu] 执行 crawl 命令")
         try:
             result = _run_crawl_pipeline(auto_summarize=True)
@@ -593,7 +658,7 @@ def handle_feishu_request(message: InboundMessage):
             response = f"爬取失败: {str(e)}"
 
     # 3. help 命令
-    elif "help" in text_lower or "帮助" in text_lower:
+    elif command == "help":
         response = """GitHub Trending Monitor - 支持的命令:
 
 1. summarize / 总结 / 热榜
@@ -607,28 +672,35 @@ def handle_feishu_request(message: InboundMessage):
 
 4. help / 帮助
    - 显示此帮助信息
+
+5. 其他任意文本
+   - 默认进入 AI 对话
 """
         response_subject = "帮助信息"
 
     # 4. ask 命令
-    elif text_lower.startswith("ask ") or text_lower.startswith("问 "):
+    elif command == "ask":
         print("[Feishu] 执行 ask 命令")
-        qa = gateway.agent_factory.get("qa")
-        if qa:
-            try:
-                question = text[4:] if text_lower.startswith("ask ") else text[2:]
-                response = qa.answer(question)
-                response_subject = "AI 回复"
-            except Exception as e:
-                logger.exception("Feishu ask failed")
-                response = f"处理问题失败: {str(e)}"
+        question = command_arg.strip()
+        if not question:
+            response = "请在 ask 后输入问题，例如: ask 这周有哪些值得关注的项目？"
+            response_subject = "AI 回复"
         else:
-            response = "QA Agent 未初始化"
+            qa = _resolve_qa_agent(message)
+            if qa:
+                try:
+                    response = qa.answer(question)
+                    response_subject = "AI 回复"
+                except Exception as e:
+                    logger.exception("Feishu ask failed")
+                    response = f"处理问题失败: {str(e)}"
+            else:
+                response = "QA Agent 未初始化"
 
     # 5. 默认 - 发送到 QA 处理
     else:
-        print("[Feishu] 路由到 QA Agent")
-        qa = gateway.agent_factory.get("qa")
+        print("[Feishu] 路由到 QA Agent (chat)")
+        qa = _resolve_qa_agent(message)
         if qa:
             try:
                 response = qa.answer(text)
