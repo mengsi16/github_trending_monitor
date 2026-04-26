@@ -60,16 +60,24 @@ The system includes four built-in team perspectives. All of them share the same 
 
 Summaries can be generated per team or for all teams at once, then delivered through email, Feishu, or CLI. The system also supports a unified crawl-and-summarize workflow so users do not need to manually stitch the steps together.
 
-### Natural-language QA with RAG retrieval
+### Natural-language QA with multi-source information retrieval
 
-The project already supports natural-language QA over historical trending data; it is not summarize-only. The current QA path includes:
+The project already supports natural-language QA over historical trending data; it is not summarize-only. The current QA path uses a **multi-source information retrieval strategy**:
 
-- **RAG retrieval**: semantic search over `latest` records in ChromaDB
+1. **RAG retrieval**: semantic search over `latest` records in ChromaDB
+2. **Playwright cache**: page snapshots from Playwright browser visits are automatically saved in `.playwright-mcp/`; the Agent can read cached data with `grep`/`read_file` instead of re-browsing
+3. **Playwright web research**: when RAG and cache both lack data, the Agent automatically uses Playwright to visit GitHub pages and fetch live information
+4. **Local file access**: the Agent can read project files, search content, and execute shell commands to directly access raw crawled data
+5. **Automatic refresh fallback**: when the knowledge base is missing or stale, QA can request a fresh crawl
+
+Additional QA features:
+
 - **Lightweight query rewriting**: `rag_search` extracts repo names, removes stop words, builds multiple retrieval variants, and merges deduplicated results
 - **Session persistence**: QA conversations are stored in SQLite and can be resumed later
-- **Automatic refresh fallback**: when the knowledge base is missing or stale, QA can request a fresh crawl
+- **Iteration intervention**: when the agent loop approaches its limit, a wrap-up instruction is injected to prevent infinite tool-call loops
+- **Graceful degradation**: if the iteration limit is exceeded, the last available text is returned instead of raising an exception
 
-In practice, this means the system can retrieve from RAG first and then answer user questions, instead of only producing scheduled summaries.
+In practice, this means the system follows a "RAG → cache → web browse → answer" pipeline, instead of only producing scheduled summaries.
 
 ### Project change analysis
 
@@ -160,7 +168,39 @@ At minimum, you should configure:
 - **Email**: SMTP / IMAP settings if you want mail delivery and mail-driven commands
 - **Feishu**: app credentials and webhook settings if you want bot integration
 
-### 3. Configure teams and bots
+### 3. Configure MCP tools (optional)
+
+The system supports loading external tools via [MCP (Model Context Protocol)](https://modelcontextprotocol.io), such as Playwright browser automation.
+
+Copy the example config and modify as needed:
+
+```bash
+cp mcp_servers_example.json mcp_servers.json
+```
+
+The built-in example is Playwright MCP. After enabling it, the QA Agent can directly control the browser. Install the dependency first:
+
+```bash
+npm install -g @playwright/mcp
+```
+
+Page snapshots from Playwright browser visits are automatically saved in the `.playwright-mcp/` directory. The QA Agent checks the cache first before initiating new browser visits, avoiding redundant requests.
+
+Servers defined in `mcp_servers.json` are connected at startup, and their tools are dynamically registered into the QA Agent's tool chain. If you don't need any MCP tools, skip this step — the system works fine without them.
+
+### 4. Workspace file tools
+
+The QA Agent includes built-in workspace file and shell tools (`src/tools/workspace.py`) — no extra configuration needed:
+
+| Tool | Purpose | Safety constraints |
+|------|---------|-------------------|
+| `read_file` | Read files under the project directory | Restricted to project root |
+| `list_dir` | List directory contents | Restricted to project root |
+| `grep` | Regex search in files | Restricted to project root, skips >5MB files |
+| `bash` | Execute shell commands | PowerShell on Windows, Bash on Linux/macOS; dangerous commands blocked |
+| `edit_file` | Edit files (find & replace) | Only `workspace/` and `.playwright-mcp/` files are editable |
+
+### 5. Configure teams and bots
 
 `config.yaml` defines teams, bots, cron schedules, and storage paths. A simplified example:
 
@@ -193,7 +233,7 @@ cron:
   summarizer_time: "30 9 * * *"
 ```
 
-### 4. Start the system
+### 6. Start the system
 
 ```bash
 python src/main.py
@@ -211,13 +251,15 @@ The system is built around Agents + Gateway + Tools:
 |------|------|
 | `CrawlerAgent` | Fetch trending data, enrich repo details and README, write to ChromaDB |
 | `SummarizerAgent` | Generate team-specific summaries from the stored data |
-| `QAAgent` | Answer questions through RAG tools and manage session history |
+| `QAAgent` | Multi-source information retrieval (RAG + Playwright + file tools), answer questions, manage session history |
 | `Gateway` | Route inbound messages and dispatch them to the correct agent |
 | `DeliveryRunner` | Send email/Feishu messages asynchronously with retries |
 | `SQLiteSessionStore` | Persist QA sessions and compacted conversation state |
 | `RAGStore` | Manage `latest` and `snapshot` project records in ChromaDB |
+| `MCPLoader` | Connect to MCP servers at startup, dynamically inject their tools into the agent toolchain |
+| `WorkspaceTools` | Provide file reading, directory browsing, text search, shell execution, and file editing |
 
-Implementation-wise, the project uses a ReAct-style agent loop, tool invocation, context compaction, and Circuit Breaker protection so that long conversations, unstable external dependencies, and multi-channel delivery remain manageable.
+Implementation-wise, the project uses a ReAct-style agent loop, tool invocation, context compaction, and Circuit Breaker protection so that long conversations, unstable external dependencies, and multi-channel delivery remain manageable. The agent loop also features iteration intervention and graceful degradation, and the Feishu WebSocket connection supports automatic reconnection on disconnect.
 
 ---
 
