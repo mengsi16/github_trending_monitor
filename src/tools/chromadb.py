@@ -7,7 +7,7 @@ from chromadb.config import Settings
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 
-README_MAX_CHARS = 8000
+README_MAX_CHARS = 200000
 QUERY_STOP_WORDS = {
     "github", "热榜", "项目", "仓库", "repo", "repository", "请问", "帮我", "分析", "介绍",
     "一下", "看看", "哪些", "什么", "怎么", "最近", "这个", "那个", "关于", "今天",

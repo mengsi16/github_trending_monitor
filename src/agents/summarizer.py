@@ -1,6 +1,7 @@
 """总结 Agent (s02, s05)"""
 from .base import BaseAgent
 from ..tools import RAG_TOOLS, RAG_HANDLERS
+from ..tools.skills import SKILLS_TOOLS, SKILLS_HANDLERS
 from src.config import config
 
 # 团队风格定义 - 作为系统提示词的一部分
@@ -97,8 +98,8 @@ class SummarizerAgent(BaseAgent):
 
     def __init__(self, name: str = "summarizer"):
         super().__init__(name, SUMMARIZER_PROMPT)
-        self.tools = RAG_TOOLS
-        self.handlers = RAG_HANDLERS
+        self.tools = RAG_TOOLS + SKILLS_TOOLS
+        self.handlers = {**RAG_HANDLERS, **SKILLS_HANDLERS}
 
     def _default_prompt(self) -> str:
         return SUMMARIZER_PROMPT
@@ -127,7 +128,8 @@ class SummarizerAgent(BaseAgent):
 
         user_msg = f"""请为 {team_style['name']} 生成今日 GitHub 热榜总结。
 
-请先调用 rag_get_latest 获取最新项目，然后生成针对性的总结。
+请先调用 load_skill("brain-base") 加载知识库 Skill，然后按 Skill 指令用 brain-base-cli search 获取最新项目信息。
+如果 brain-base 不可用或失败，降级调用 rag_get_latest 获取最新项目。
 
 要求：
 1. 必须使用上述团队风格来输出

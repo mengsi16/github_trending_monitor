@@ -79,6 +79,21 @@ Additional QA features:
 
 In practice, this means the system follows a "RAG → cache → web browse → answer" pipeline, instead of only producing scheduled summaries.
 
+### Optional: plug in brain-base as an external knowledge backend (decoupled integration)
+
+**brain-base** is a standalone Agentic RAG knowledge base project providing Milvus vector search, Agentic answering, doc2query synthesis, and self-evolving crystallization. github-trending-monitor is **fully decoupled** from brain-base at the code level:
+
+- This project **does not bundle brain-base code** and **does not duplicate its skill files**
+- The only coupling point is the `BRAIN_BASE_PATH` environment variable, which points at the brain-base repository root
+- At startup, `SkillLoader` dynamically resolves brain-base's skill content, and the `brain_base` tool invokes `brain-base-cli.py` via subprocess
+- When `BRAIN_BASE_PATH` is unset or brain-base is unavailable / returns nothing, the QA Agent gracefully falls back to ChromaDB + web browsing; the main flow is never blocked
+- When brain-base ships new CLI commands or skill instructions, **this project needs zero code sync** — a restart is enough to pick up the latest capabilities
+
+Integration has two layers:
+
+1. **Skill instruction layer**: `skills/brain-base/SKILL.md` is a thin pointer file. `SkillLoader` reads the upstream skill body from `BRAIN_BASE_PATH` at load time via the `external-skill: true` and `source-path` fields
+2. **Tool function layer**: `src/tools/brain_base.py` only wraps high-frequency commands (`search` / `ask` / `exists` / `ingest-url` / `enrich-chunks`); low-frequency commands (`feedback` / `resume` / `history` / `remove-doc`, etc.) are invoked by the Agent directly through the skill instructions against `brain-base-cli.py`
+
 ### Project change analysis
 
 Beyond keeping history, the system can explain how a project changed compared with its previous content version. The current change analysis focuses on **content changes**, not metrics time series:
@@ -96,7 +111,9 @@ The system supports multiple Feishu bots running in a single process, each with 
 
 - **Multi-bot routing**: `account_id` is used to route each Feishu bot to the correct agent instance
 - **Multi-channel access**: CLI, email, and Feishu share a common dispatch model
-- **Session isolation**: each QA instance maintains separate conversation state
+- **Per-channel session isolation**: each `channel:peer_id` combination (e.g. `feishu:oc_xxx`, `cli:default`, `email:user@xxx`) maintains an independent session context, preventing cross-channel iteration depth exhaustion and context pollution
+- **Thread safety**: QAAgent uses a `threading.Lock` to guard concurrent access, allowing the Feishu polling thread and the CLI main thread to run in parallel safely
+- **Message history validation**: before each API call, the agent loop automatically validates `tool_use`/`tool_result` pairing and repairs orphaned references caused by context compaction, preventing `tool_use_id not found` errors
 - **Reliable delivery**: outgoing messages use queues, retries, and persisted failure handling
 
 ---
@@ -200,7 +217,38 @@ The QA Agent includes built-in workspace file and shell tools (`src/tools/worksp
 | `bash` | Execute shell commands | PowerShell on Windows, Bash on Linux/macOS; dangerous commands blocked |
 | `edit_file` | Edit files (find & replace) | Only `workspace/` and `.playwright-mcp/` files are editable |
 
-### 5. Configure teams and bots
+### 5. Optional: plug in brain-base
+
+If you want QA to prefer brain-base's Agentic RAG backend, do the following:
+
+1. Clone the brain-base repository somewhere (e.g. `~/repos/brain-base`) and bring up Milvus per its own README
+2. Point this project at that repository via an environment variable:
+
+   ```bash
+   # Linux / macOS
+   export BRAIN_BASE_PATH="/absolute/path/to/brain-base"
+   export BRAIN_BASE_CLAUDE_BIN="claude"   # optional: override the claude binary
+   ```
+
+   ```powershell
+   # Windows PowerShell
+   $env:BRAIN_BASE_PATH = "E:\path\to\brain-base"
+   $env:BRAIN_BASE_CLAUDE_BIN = "claude"
+   ```
+
+3. Recommended health check before starting this project:
+
+   ```bash
+   python "$BRAIN_BASE_PATH/bin/brain-base-cli.py" health
+   ```
+
+**Key invariants**:
+
+- If `BRAIN_BASE_PATH` is unset, `brain_base_*` tools return a clear error and `load_skill("brain-base")` returns `BRAIN_BASE_PATH is not set`; QA automatically falls back to the ChromaDB + web browsing path and the main flow is not blocked
+- This project **only scans its own `skills/` directory** — it never enumerates external paths; brain-base's upstream skill body is only read on an explicit `load_skill` call via the `source-path` field, preventing arbitrary file reads
+- brain-base upgrades do not require any manual code sync here: as long as the pointer fields (`source-path`) stay stable, a restart is enough to pick up the new skill body and CLI commands
+
+### 6. Configure teams and bots
 
 `config.yaml` defines teams, bots, cron schedules, and storage paths. A simplified example:
 
@@ -233,7 +281,7 @@ cron:
   summarizer_time: "30 9 * * *"
 ```
 
-### 6. Start the system
+### 7. Start the system
 
 ```bash
 python src/main.py
@@ -251,15 +299,19 @@ The system is built around Agents + Gateway + Tools:
 |------|------|
 | `CrawlerAgent` | Fetch trending data, enrich repo details and README, write to ChromaDB |
 | `SummarizerAgent` | Generate team-specific summaries from the stored data |
-| `QAAgent` | Multi-source information retrieval (RAG + Playwright + file tools), answer questions, manage session history |
+| `QAAgent` | Multi-source information retrieval (RAG + Playwright + file tools), answer questions, manage per-channel isolated session history |
 | `Gateway` | Route inbound messages and dispatch them to the correct agent |
 | `DeliveryRunner` | Send email/Feishu messages asynchronously with retries |
 | `SQLiteSessionStore` | Persist QA sessions and compacted conversation state |
 | `RAGStore` | Manage `latest` and `snapshot` project records in ChromaDB |
 | `MCPLoader` | Connect to MCP servers at startup, dynamically inject their tools into the agent toolchain |
 | `WorkspaceTools` | Provide file reading, directory browsing, text search, shell execution, and file editing |
+| `MemoryWatchdog` | Periodically monitor process memory; auto-snapshot or restart on threshold breach; exposes `memory_snapshot` as a Tool |
+| `LaneQueue` | Lane concurrency control — user input takes priority over background tasks (Heartbeat, etc.) |
+| `SkillLoader` | Scans this project's `skills/` directory; supports `external-skill: true` thin pointers that lazily resolve upstream skill content from `BRAIN_BASE_PATH`; exposes `list_skills` / `load_skill` tools |
+| `BrainBaseTool` | Wraps high-frequency `brain-base-cli.py` commands (`search` / `ask` / `exists` / `ingest-url` / `enrich-chunks`); degrades gracefully when `BRAIN_BASE_PATH` is unset |
 
-Implementation-wise, the project uses a ReAct-style agent loop, tool invocation, context compaction, and Circuit Breaker protection so that long conversations, unstable external dependencies, and multi-channel delivery remain manageable. The agent loop also features iteration intervention and graceful degradation, and the Feishu WebSocket connection supports automatic reconnection on disconnect.
+Implementation-wise, the project uses a ReAct-style agent loop, tool invocation, context compaction, and Circuit Breaker protection so that long conversations, unstable external dependencies, and multi-channel delivery remain manageable. The agent loop also features iteration intervention and graceful degradation, and the Feishu WebSocket connection supports automatic reconnection on disconnect. In multi-channel concurrent scenarios, QAAgent ensures isolation across channels via per-channel session contexts and a thread-safety lock; a message history validation mechanism automatically repairs `tool_use`/`tool_result` mismatches introduced by context compaction before each API call.
 
 ---
 
@@ -276,3 +328,7 @@ The current `requirements.txt` includes these main dependencies:
 - `beautifulsoup4`
 
 If you only want to validate the local CLI + RAG flow, the minimum requirement is a working LLM configuration, a writable ChromaDB persistence directory, and the Python dependencies above.
+
+Optional external knowledge backend:
+
+- **brain-base** (standalone Agentic RAG repository, activated via the `BRAIN_BASE_PATH` environment variable): no entry required in `requirements.txt`; simply clone that repo locally and bring up Milvus per its own README

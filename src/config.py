@@ -40,6 +40,8 @@ class Config:
     github_api_url: str = "https://api.github.com"
     github_top_n: int = 20
     chromadb_dir: str = "./workspace/.chromadb"
+    brain_base_dir: str = ""
+    skills_dir: str = ""
     retry_backoff: List[int] = field(default_factory=lambda: [5, 25, 120, 600])
     max_retries: int = 5
     teams: List[TeamConfig] = field(default_factory=list)
@@ -84,6 +86,8 @@ def load_config() -> Config:
         github_api_url=data.get("github", {}).get("api_url", "https://api.github.com"),
         github_top_n=data.get("github", {}).get("top_n", 20),
         chromadb_dir=data.get("chromadb", {}).get("persist_directory", "./workspace/.chromadb"),
+        brain_base_dir=data.get("brain_base", {}).get("dir", ""),
+        skills_dir=data.get("skills", {}).get("dir", ""),
         retry_backoff=data.get("delivery", {}).get("retry_backoff", [5, 25, 120, 600]),
         max_retries=data.get("delivery", {}).get("max_retries", 5),
         teams=teams,

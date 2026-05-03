@@ -573,7 +573,7 @@ def handle_email_request(message: InboundMessage):
             qa = _resolve_qa_agent(message)
             if qa:
                 try:
-                    response = qa.answer(question)
+                    response = qa.answer(question, channel=message.channel, peer_id=message.sender_id)
                     response_subject = "AI 回复"
                 except Exception as e:
                     logger.exception("Email ask failed")
@@ -588,7 +588,7 @@ def handle_email_request(message: InboundMessage):
         question = text if text else subject
         if qa:
             try:
-                response = qa.answer(question)
+                response = qa.answer(question, channel=message.channel, peer_id=message.sender_id)
                 response_subject = "AI 回复"
             except Exception as e:
                 logger.exception("Email QA failed")
@@ -689,7 +689,7 @@ def handle_feishu_request(message: InboundMessage):
             qa = _resolve_qa_agent(message)
             if qa:
                 try:
-                    response = qa.answer(question)
+                    response = qa.answer(question, channel=message.channel, peer_id=message.peer_id)
                     response_subject = "AI 回复"
                 except Exception as e:
                     logger.exception("Feishu ask failed")
@@ -703,7 +703,7 @@ def handle_feishu_request(message: InboundMessage):
         qa = _resolve_qa_agent(message)
         if qa:
             try:
-                response = qa.answer(text)
+                response = qa.answer(text, channel=message.channel, peer_id=message.peer_id)
                 response_subject = "AI 回复"
             except Exception as e:
                 logger.exception("Feishu QA failed")

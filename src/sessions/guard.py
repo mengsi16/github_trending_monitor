@@ -93,7 +93,7 @@ class ContextGuard:
                 current_messages = self._compact_history(client, current_messages)
 
     def _truncate_large_tool_results(self, messages: List[Dict]) -> List[Dict]:
-        """截断超过 8000 字符的工具结果"""
+        """截断超过 200000 字符的工具结果"""
         result = []
         for msg in messages:
             if msg.get("role") == "user" and isinstance(msg.get("content"), list):
@@ -101,8 +101,8 @@ class ContextGuard:
                 for block in msg["content"]:
                     if block.get("type") == "tool_result":
                         content = block.get("content", "")
-                        if len(content) > 8000:
-                            content = content[:8000] + "\n...[truncated]"
+                        if len(content) > 200000:
+                            content = content[:200000] + "\n...[truncated]"
                         block = dict(block)
                         block["content"] = content
                     new_content.append(block)

@@ -21,7 +21,7 @@ except ImportError:
 class CompactConfig:
     """压缩配置"""
     # Micro-compact: 截断阈值
-    tool_result_max_chars: int = 4000  # tool_result 超过此长度则截断
+    tool_result_max_chars: int = 200000  # tool_result 超过此长度则截断
     tool_result_keep_suffix: str = "\n...[已截断]"
 
     # Auto-compact: token 阈值

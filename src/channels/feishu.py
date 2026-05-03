@@ -103,6 +103,56 @@ class FeishuChannel(Channel):
         self._use_rpc = os.getenv("FEISHU_USE_RPC", "true").lower() == "true"  # 默认使用长连接
         self._running = False
 
+        # WebSocket 心跳/重连调优（对应 "receive message loop exit, no close frame" 断线）
+        # SDK 默认 ping_interval=120s 在很多家用路由/企业防火墙/VPN 下会被 NAT 回收。
+        # 把 ping 压到 30s 可显著减少静默断开；reconnect_interval 压短让断线后更快恢复。
+        def _env_int(name: str, default: int, lo: int = 1, hi: int = 3600) -> int:
+            try:
+                v = int(os.getenv(name, str(default)))
+                return max(lo, min(hi, v))
+            except (TypeError, ValueError):
+                return default
+
+        self._ws_ping_interval = _env_int("FEISHU_WS_PING_INTERVAL", 30)
+        self._ws_reconnect_interval = _env_int("FEISHU_WS_RECONNECT_INTERVAL", 10)
+
+    def _apply_ws_tuning(self, rpc_client) -> None:
+        """给单个 lark.ws.Client 钉死 ping / reconnect 间隔。
+
+        背景：SDK 的 _configure() 会在 connect 响应和每次 pong 之后被调用，
+        用服务端下发的 ClientConfig 覆盖 _ping_interval / _reconnect_interval。
+        这里包装 _configure，把服务端下发值夹到我们允许的上限，避免被改回 120s。
+        """
+        ping_iv = self._ws_ping_interval
+        reconnect_iv = self._ws_reconnect_interval
+
+        try:
+            rpc_client._ping_interval = ping_iv
+            rpc_client._reconnect_interval = reconnect_iv
+        except Exception:
+            pass
+
+        original_configure = getattr(rpc_client, "_configure", None)
+        if original_configure is None:
+            return
+
+        def _clamped_configure(conf):
+            try:
+                original_configure(conf)
+            finally:
+                try:
+                    if getattr(rpc_client, "_ping_interval", ping_iv) > ping_iv:
+                        rpc_client._ping_interval = ping_iv
+                    if getattr(rpc_client, "_reconnect_interval", reconnect_iv) > reconnect_iv:
+                        rpc_client._reconnect_interval = reconnect_iv
+                except Exception:
+                    pass
+
+        try:
+            rpc_client._configure = _clamped_configure
+        except Exception:
+            pass
+
     def register_bot(self, bot_id: str, app_id: str, app_secret: str, bot_open_id: str = ""):
         """注册一个新的 Bot 配置（多 Bot 支持）"""
         self._bots[bot_id] = {
@@ -542,10 +592,15 @@ class FeishuChannel(Channel):
                                 log_level=lark.LogLevel.WARNING
                             )
                             bot["rpc_client"] = rpc_client
+                            # 必须在 _connect 之前钉死心跳参数，否则首个响应里的 ClientConfig 会把值改回 120s
+                            self._apply_ws_tuning(rpc_client)
                             await rpc_client._connect()
                             loop.create_task(rpc_client._ping_loop())
                             connected += 1
-                            _logger.info(f"Bot {bot_id} 长连接客户端已启动，等待消息...")
+                            _logger.info(
+                                f"Bot {bot_id} 长连接客户端已启动，等待消息... "
+                                f"(ping={self._ws_ping_interval}s, reconnect={self._ws_reconnect_interval}s)"
+                            )
                         except Exception as e:
                             bot["rpc_client"] = None
                             _logger.error(f"Bot {bot_id} 长连接启动失败: {e}")
@@ -640,7 +695,11 @@ class FeishuChannel(Channel):
                     log_level=lark.LogLevel.WARNING
                 )
                 bot["rpc_client"] = rpc_client
-                _logger.info(f"Bot {bot_id} 长连接客户端已启动，等待消息...")
+                self._apply_ws_tuning(rpc_client)
+                _logger.info(
+                    f"Bot {bot_id} 长连接客户端已启动，等待消息... "
+                    f"(ping={self._ws_ping_interval}s, reconnect={self._ws_reconnect_interval}s)"
+                )
                 rpc_client.start()
             except Exception as e:
                 _logger.error(f"Bot {bot_id} 长连接启动失败: {e}")

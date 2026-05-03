@@ -4,6 +4,7 @@ import json
 import time
 import random
 import logging
+import threading
 from abc import ABC, abstractmethod
 from typing import List, Dict, Any, Optional
 from anthropic import Anthropic
@@ -73,7 +74,7 @@ class BaseAgent(ABC):
         from src.config import config
         agent_cfg = config.agents.get(name)
         self.model = agent_cfg.model if agent_cfg else "claude-sonnet-4-20250514"
-        self.max_tokens = agent_cfg.max_tokens if agent_cfg else 4096
+        self.max_tokens = agent_cfg.max_tokens if agent_cfg else 16384
 
         api_key = os.getenv("ANTHROPIC_API_KEY")
         if not api_key:
@@ -161,6 +162,119 @@ class BaseAgent(ABC):
         """获取压缩统计信息"""
         return self.compactor.get_stats()
 
+    def _validate_messages(self, messages: List[Dict]) -> List[Dict]:
+        """Validate and repair message history for API consistency.
+
+        Ensures:
+        1. Every tool_result references a tool_use_id that exists in a preceding assistant message
+        2. Every tool_use block has a corresponding tool_result in the next user message
+        """
+        if not messages:
+            return messages
+
+        # Step 1: Collect all valid tool_use_ids from assistant messages
+        valid_tool_ids = set()
+        for msg in messages:
+            if msg.get("role") == "assistant" and isinstance(msg.get("content"), list):
+                for block in msg["content"]:
+                    if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("id"):
+                        valid_tool_ids.add(block["id"])
+
+        # Step 2: Build repaired message list
+        result = []
+        i = 0
+        while i < len(messages):
+            msg = messages[i]
+
+            if msg.get("role") == "assistant" and isinstance(msg.get("content"), list):
+                # Check if this assistant message has tool_use blocks
+                tool_use_ids_in_msg = []
+                for block in msg["content"]:
+                    if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("id"):
+                        tool_use_ids_in_msg.append(block["id"])
+
+                result.append(msg)
+
+                if tool_use_ids_in_msg:
+                    # The next message must be a user message with tool_results for ALL tool_use_ids
+                    next_msg = messages[i + 1] if i + 1 < len(messages) else None
+                    if next_msg and next_msg.get("role") == "user":
+                        next_content = next_msg.get("content", [])
+                        if isinstance(next_content, list):
+                            provided_ids = set()
+                            new_content = []
+                            for block in next_content:
+                                if isinstance(block, dict) and block.get("type") == "tool_result":
+                                    tid = block.get("tool_use_id", "")
+                                    if tid in valid_tool_ids:
+                                        provided_ids.add(tid)
+                                        new_content.append(block)
+                                    # else: orphaned tool_result, skip it
+                                else:
+                                    new_content.append(block)
+
+                            # Add dummy tool_results for missing ids
+                            for tid in tool_use_ids_in_msg:
+                                if tid not in provided_ids:
+                                    new_content.append({
+                                        "type": "tool_result",
+                                        "tool_use_id": tid,
+                                        "content": "[工具调用结果因上下文压缩而丢失]"
+                                    })
+
+                            result.append({**next_msg, "content": new_content})
+                            i += 2
+                            continue
+                        elif isinstance(next_content, str):
+                            # Next message content is a plain string, convert to list
+                            new_content = [{"type": "text", "text": next_content}]
+                            for tid in tool_use_ids_in_msg:
+                                new_content.append({
+                                    "type": "tool_result",
+                                    "tool_use_id": tid,
+                                    "content": "[工具调用结果因上下文压缩而丢失]"
+                                })
+                            result.append({**next_msg, "content": new_content})
+                            i += 2
+                            continue
+                    else:
+                        # No next user message - add a synthetic one with dummy tool_results
+                        new_content = []
+                        for tid in tool_use_ids_in_msg:
+                            new_content.append({
+                                "type": "tool_result",
+                                "tool_use_id": tid,
+                                "content": "[工具调用结果因上下文压缩而丢失]"
+                            })
+                        result.append({"role": "user", "content": new_content})
+                        i += 1
+                        continue
+
+            elif msg.get("role") == "user" and isinstance(msg.get("content"), list):
+                # Remove orphaned tool_results (not preceded by a matching tool_use)
+                new_content = []
+                modified = False
+                for block in msg["content"]:
+                    if isinstance(block, dict) and block.get("type") == "tool_result":
+                        tid = block.get("tool_use_id", "")
+                        if tid not in valid_tool_ids:
+                            modified = True
+                            continue  # Remove orphaned tool_result
+                    new_content.append(block)
+
+                if modified:
+                    if not new_content:
+                        new_content = [{"type": "text", "text": "[上下文已压缩，工具调用记录丢失]"}]
+                    result.append({**msg, "content": new_content})
+                else:
+                    result.append(msg)
+            else:
+                result.append(msg)
+
+            i += 1
+
+        return result
+
     def run(self, user_message: str, messages: List[Dict] = None,
             tools: List[Dict] = None, tool_handlers: Dict = None,
             override_system_prompt: str = None) -> tuple[str, List[Dict]]:
@@ -202,6 +316,9 @@ class BaseAgent(ABC):
         # 应用上下文压缩 (Layer 1 & 2)
         messages = self._apply_compaction(messages)
         _logger.debug(f"压缩后 messages 数量: {len(messages)}")
+
+        # 验证消息历史一致性（修复压缩导致的 tool_use/tool_result 不匹配）
+        messages = self._validate_messages(messages)
 
         iteration = 0
         max_iterations = 50

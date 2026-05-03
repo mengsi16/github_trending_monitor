@@ -130,6 +130,11 @@ FEISHU_BOT_OPEN_ID=oc_xxx  # 机器人 ID（可选）
 
 # 日志配置（可选）
 # FEISHU_LOG_LEVEL=INFO  # DEBUG/INFO/WARNING/ERROR，默认 INFO
+
+# 长连接心跳/重连调优（可选，仅长连接模式生效）
+# FEISHU_WS_PING_INTERVAL=30         # 客户端主动 ping 间隔（秒），默认 30。SDK 原生默认 120。
+# FEISHU_WS_RECONNECT_INTERVAL=10    # 断线后重连间隔（秒），默认 10。SDK 原生默认 120。
+# 具体说明见 Q8
 ```
 
 ### 4.2 配置文件 (config.yaml)
@@ -420,6 +425,40 @@ FEISHU_LOG_LEVEL=WARNING
 # 默认 DEBUG 输出很多调试信息
 lark.LogLevel.WARNING  # 改为 WARNING 减少输出
 ```
+
+### Q8: 日志出现 `receive message loop exit, err: no close frame received or sent` 怎么办？
+
+**结论先行**：这是 `lark-oapi` SDK 内部打的错误日志，不是程序崩溃。如果紧跟着还有 `trying to reconnect` / `connected to ...` 则说明已自动恢复，可忽略。目标是减少它的出现频率和缩短恢复窗口。
+
+**原因**：
+- SDK 的 `_receive_message_loop` 在 `await self._conn.recv()` 读到 TCP FIN/RST 但**没收到 WebSocket close 帧**时抛此错。
+- 这一般是 NAT / 企业防火墙 / VPN / WiFi 切换 / 代理回收空闲 TCP 映射导致的。
+- SDK 原生 `_ping_interval=120s` 在很多家用路由/企业网下太长（空闲超时常见的是 60-120s），还没来得及发 ping 就被断掉了。
+
+**平时表现**：
+```text
+[Feishu] ERROR receive message loop exit, err: no close frame received or sent [conn_id=7635...]
+[Feishu] INFO  trying to reconnect for the 1st time
+[Feishu] INFO  connected to wss://...
+```
+
+**恢复方案**：本项目已内置调优（`src/channels/feishu.py::_apply_ws_tuning`），默认将 ping 压到 30s、reconnect 压到 10s，并封装了 SDK 的 `_configure()` 避免被服务端下发的 `ClientConfig` 改回 120s。如需进一步调整：
+
+```bash
+# .env 中覆盖（越短越能喂活 NAT，但亦消耗更多流量）
+FEISHU_WS_PING_INTERVAL=30       # 范围 1-3600，默认 30；苛刻企业网可试 15
+FEISHU_WS_RECONNECT_INTERVAL=10  # 范围 1-3600，默认 10；断线后等多久重试
+```
+
+**验证生效**：重启进程后，启动日志应出现已生效的值：
+```text
+[Feishu] INFO Bot default 长连接客户端已启动，等待消息... (ping=30s, reconnect=10s)
+```
+
+**什么情况下真的是 bug**：
+- ERROR 之后**数分钟内看不到** `trying to reconnect` / `connected to ...`
+- 或者看到 `ServerUnreachableException: unable to connect to the server after trying N times`
+- 这两种才属于重连真的失败，需要排查网络 / 凭证 / 服务端状态。单纯的 `no close frame` 行不是 bug。
 
 ---
 
